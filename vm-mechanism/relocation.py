@@ -1,126 +1,166 @@
 #! /usr/bin/env python
 
-from __future__ import print_function
 import sys
-from optparse import OptionParser
+import argparse
 import random
-import math
+import time
 
-# to make Python2 and Python3 act the same -- how dumb
-def random_seed(seed):
-    try:
-        random.seed(seed, version=1)
-    except:
-        random.seed(seed)
-    return
+UNITS = {"k": 1024, "m": 1024 * 1024, "g": 1024 * 1024 * 1024}
+
 
 def convert(size):
-    length = len(size)
-    lastchar = size[length-1]
-    if (lastchar == 'k') or (lastchar == 'K'):
-        m = 1024
-        nsize = int(size[0:length-1]) * m
-    elif (lastchar == 'm') or (lastchar == 'M'):
-        m = 1024*1024
-        nsize = int(size[0:length-1]) * m
-    elif (lastchar == 'g') or (lastchar == 'G'):
-        m = 1024*1024*1024
-        nsize = int(size[0:length-1]) * m
-    else:
-        nsize = int(size)
-    return nsize
+    """Converts strings like '1k', '4m' to integer byte counts."""
+    size = str(size)
+    try:
+        if not size:
+            return 0
+        if size[-1].lower() in UNITS:
+            return int(size[:-1]) * UNITS[size[-1].lower()]
+        return int(float(size))
+    except ValueError:
+        return 0
 
 
 #
 # main program
 #
-parser = OptionParser()
-parser.add_option('-s', '--seed',      default=0,     help='the random seed',                                action='store', type='int', dest='seed')
-parser.add_option('-a', '--asize',     default='1k',  help='address space size (e.g., 16, 64k, 32m, 1g)',    action='store', type='string', dest='asize')
-parser.add_option('-p', '--physmem',   default='16k', help='physical memory size (e.g., 16, 64k, 32m, 1g)',  action='store', type='string', dest='psize')
-parser.add_option('-n', '--addresses', default=5,     help='number of virtual addresses to generate',        action='store', type='int', dest='num')
-parser.add_option('-b', '--b',         default='-1',  help='value of base register',                         action='store', type='string', dest='base')
-parser.add_option('-l', '--l',         default='-1',  help='value of limit register',                        action='store', type='string', dest='limit')
-parser.add_option('-c', '--compute',   default=False, help='compute answers for me',                         action='store_true', dest='solve')
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-a",
+        "--asize",
+        default="1k",
+        help="address space size (e.g., 16, 64k, 32m, 1g)",
+        type=str,
+    )
+    parser.add_argument(
+        "-p",
+        "--physmem",
+        default="16k",
+        help="physical memory size (e.g., 16, 64k, 32m, 1g)",
+        type=str,
+        dest="psize",
+    )
+    parser.add_argument(
+        "-n",
+        "--addresses",
+        default=5,
+        help="number of virtual addresses to generate",
+        type=int,
+        dest="num",
+    )
+    parser.add_argument(
+        "-b",
+        "--base",
+        default="-1",
+        help="value of base register",
+        type=str,
+        dest="base",
+    )
+    parser.add_argument(
+        "-l",
+        "--limit",
+        default="-1",
+        help="value of limit register",
+        type=str,
+        dest="limit",
+    )
+    parser.add_argument(
+        "-c",
+        "--compute",
+        default=False,
+        help="compute answers for me",
+        action="store_true",
+        dest="solve",
+    )
 
+    args = parser.parse_args()
+    seed = int(time.time())
+    print(f"ARG seed {seed}")
+    print(f"ARG address space size {args.asize}")
+    print(f"ARG phys mem size {args.psize}\n")
 
-(options, args) = parser.parse_args()
+    asize = convert(args.asize)
+    psize = convert(args.psize)
 
-print('')
-print('ARG seed', options.seed)
-print('ARG address space size', options.asize)
-print('ARG phys mem size', options.psize)
-print('')
+    if psize <= 1:
+        print("Error: must specify a non-zero physical memory size.")
+        sys.exit(1)
 
-random_seed(options.seed)
-asize = convert(options.asize)
-psize = convert(options.psize)
+    if asize == 0:
+        print("Error: must specify a non-zero address-space size.")
+        sys.exit(1)
 
-if psize <= 1:
-    print('Error: must specify a non-zero physical memory size.')
-    exit(1)
+    if psize <= asize:
+        print(
+            "Error: physical memory size must be GREATER than address space size (for this simulation)"
+        )
+        sys.exit(1)
 
-if asize == 0:
-    print('Error: must specify a non-zero address-space size.')
-    exit(1)
+    #
+    # need to generate base, bounds for segment registers
+    #
+    limit = convert(args.limit)
+    base = convert(args.base)
+    random.seed(seed)
 
-if psize <= asize:
-    print('Error: physical memory size must be GREATER than address space size (for this simulation)')
-    exit(1)
+    if limit == -1:
+        limit = int(asize / 4.0 + (asize / 4.0 * random.random()))
 
-#
-# need to generate base, bounds for segment registers
-#
-limit = convert(options.limit)
-base  = convert(options.base)
+    if base == -1:
+        # Direct calculation is more efficient than a while loop
+        base = random.randint(0, psize - limit)
 
-if limit == -1:
-    limit = int(asize/4.0 + (asize/4.0 * random.random()))
+    print("Base-and-Bounds register information:\n")
+    print(f"  Base   : 0x{base:08x} (decimal {base})")
+    print(f"  Limit  : {limit}\n")
 
-# now have to find room for them
-if base == -1:
-    done = 0
-    while done == 0:
-        base = int(psize * random.random())
-        if (base + limit) < psize:
-            done = 1
+    if base + limit > psize:
+        print(
+            "Error: address space does not fit into physical memory with those base/bounds values."
+        )
+        print(f"Base + Limit: {base + limit}  Psize: {psize}")
+        sys.exit(1)
 
-print('Base-and-Bounds register information:')
-print('')
-print('  Base   : 0x%08x (decimal %d)' % (base, base))
-print('  Limit  : %d' % (limit))
-print('')
-
-if base + limit > psize:
-    print('Error: address space does not fit into physical memory with those base/bounds values.')
-    print('Base + Limit:', base + limit, '  Psize:', psize)
-    exit(1)
-
-#
-# now, need to generate virtual address trace
-#
-print('Virtual Address Trace')
-for i in range(0,options.num):
-    vaddr = int(asize * random.random())
-    if options.solve == False:
-        print('  VA %2d: 0x%08x (decimal: %4d) --> PA or segmentation violation?' % (i, vaddr, vaddr))
-    else:
-        paddr = 0
-        if (vaddr >= limit):
-            print('  VA %2d: 0x%08x (decimal: %4d) --> SEGMENTATION VIOLATION' % (i, vaddr, vaddr))
+    #
+    # now, need to generate virtual address trace
+    #
+    print("Virtual Address Trace")
+    for i in range(args.num):
+        vaddr = random.randrange(asize)
+        if not args.solve:
+            print(
+                f"  VA {i:2d}: 0x{vaddr:08x} (decimal: {vaddr:4d}) --> PA or segmentation violation?"
+            )
         else:
-            paddr = vaddr + base
-            print('  VA %2d: 0x%08x (decimal: %4d) --> VALID: 0x%08x (decimal: %4d)' % (i, vaddr, vaddr, paddr, paddr))
+            if vaddr >= limit:
+                print(
+                    f"  VA {i:2d}: 0x{vaddr:08x} (decimal: {vaddr:4d}) --> SEGMENTATION VIOLATION"
+                )
+            else:
+                paddr = vaddr + base
+                print(
+                    f"  VA {i:2d}: 0x{vaddr:08x} (decimal: {vaddr:4d}) --> VALID: 0x{paddr:08x} (decimal: {paddr:4d})"
+                )
 
-print('')
+    print("")
 
-if options.solve == False:
-    print('For each virtual address, either write down the physical address it translates to')
-    print('OR write down that it is an out-of-bounds address (a segmentation violation). For')
-    print('this problem, you should assume a simple virtual address space of a given size.')
-    print('')
+    if not args.solve:
+        print(
+            "For each virtual address, either write down the physical address it translates to"
+        )
+        print(
+            "OR write down that it is an out-of-bounds address (a segmentation violation). For"
+        )
+        print(
+            "this problem, you should assume a simple virtual address space of a given size."
+        )
+        print("")
 
 
-
-
-
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)

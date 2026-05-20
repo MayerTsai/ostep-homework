@@ -297,8 +297,9 @@ assert percent > 0
 
 seed = args.seed if args.seed != 0 else int(time.time())
 random.seed(seed)  # Use the provided seed for reproducibility
-L = []  # located address map list
-p = {}  # available to be freed address location
+L = []
+p = {}
+
 
 if args.opsList == "":
     c = 0
@@ -311,8 +312,8 @@ if args.opsList == "":
             if ptr != -1:
                 p[c] = ptr
                 L.append(c)
-            print(f"ptr[{c}] = Alloc({size})", end="")
 
+            print(f"ptr[{c}] = Alloc({size})", end="")
             if args.solve:
                 print(f" returned {ptr + args.headerSize} (searched {cnt} elements)")
             else:
@@ -327,14 +328,12 @@ if args.opsList == "":
                 target_ptr_id = L.pop(random.randrange(len(L)))
                 rc = m.free(p.pop(target_ptr_id))
                 print(f"Free(ptr[{target_ptr_id}])", end="")
-
                 if args.solve:
                     print(f" returned {rc}")
                 else:
                     print(" returned ?")
-
-                j += 1
                 pr = True
+                j += 1
         if pr:
             if args.solve:
                 m.dump()
@@ -351,12 +350,13 @@ else:
             if ptr != -1:
                 p[c] = ptr
             print(f"ptr[{c}] = Alloc({size})", end="")
-            c += 1
 
             if args.solve:
                 print(f" returned {ptr} (searched {cnt} elements)")
             else:
                 print(" returned ?")
+
+            c += 1
         elif op[0] == "-":
             # free
             index = int(op.split("-")[1])

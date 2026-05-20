@@ -1,132 +1,135 @@
-#! /usr/bin/env python
+#! /usr/bin/python3
 
-from __future__ import print_function
 import sys
-from optparse import OptionParser
+import argparse
 import random
+import time
 
-# to make Python2 and Python3 act the same -- how dumb
-def random_seed(seed):
-    try:
-        random.seed(seed, version=1)
-    except:
-        random.seed(seed)
-    return
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "-j",
+    "--jobs",
+    default=3,
+    help="number of jobs in the system",
+    type=int,
+)
+parser.add_argument(
+    "-l",
+    "--jlist",
+    default="",
+    help="instead of random jobs, provide a comma-separated list of run times and ticket values (e.g., 10:100,20:100 would have two jobs with run-times of 10 and 20, each with 100 tickets)",
+    type=str,
+)
+parser.add_argument(
+    "-m",
+    "--maxlen",
+    default=10,
+    help="max length of job",
+    type=int,
+)
+parser.add_argument(
+    "-T",
+    "--maxticket",
+    default=100,
+    help="maximum ticket value, if randomly assigned",
+    type=int,
+)
+parser.add_argument(
+    "-q",
+    "--quantum",
+    default=1,
+    help="length of time slice",
+    type=int,
+)
+parser.add_argument(
+    "-s",
+    "--seed",
+    default=None,
+    help="random seed",
+    type=int,
+)
+parser.add_argument(
+    "-c",
+    "--compute",
+    help="compute answers for me",
+    action="store_true",
+    default=False,
+    dest="solve",
+)
 
-parser = OptionParser()
-parser.add_option('-s', '--seed', default=0, help='the random seed',              action='store', type='int', dest='seed')
-parser.add_option('-j', '--jobs', default=3, help='number of jobs in the system', action='store', type='int', dest='jobs')
-parser.add_option('-l', '--jlist', default='', help='instead of random jobs, provide a comma-separated list of run times and ticket values (e.g., 10:100,20:100 would have two jobs with run-times of 10 and 20, each with 100 tickets)',  action='store', type='string', dest='jlist')
-parser.add_option('-m', '--maxlen',  default=10,  help='max length of job',         action='store', type='int', dest='maxlen')
-parser.add_option('-T', '--maxticket', default=100, help='maximum ticket value, if randomly assigned',          action='store', type='int', dest='maxticket')
-parser.add_option('-q', '--quantum', default=1,   help='length of time slice', action='store', type='int', dest='quantum')
-parser.add_option('-c', '--compute', help='compute answers for me', action='store_true', default=False, dest='solve')
+args = parser.parse_args()
 
-(options, args) = parser.parse_args()
+seed = args.seed if args.seed is not None else int(time.time())
+random.seed(seed)
 
-random_seed(options.seed)
-
-print('ARG jlist', options.jlist)
-print('ARG jobs', options.jobs)
-print('ARG maxlen', options.maxlen)
-print('ARG maxticket', options.maxticket)
-print('ARG quantum', options.quantum)
-print('ARG seed', options.seed)
-print('')
-
-print('Here is the job list, with the run time of each job: ')
-
-import operator
-
-
-tickTotal = 0
-runTotal  = 0
-joblist = []
-if options.jlist == '':
-    for jobnum in range(0,options.jobs):
-        runtime = 0
-        while runtime == 0:
-            runtime = int(options.maxlen * random.random())
-        tickets = 0
-        while tickets == 0:
-            tickets = int(options.maxticket * random.random())
-        runTotal += runtime
-        tickTotal += tickets
-        joblist.append([jobnum, runtime, tickets])
-        print('  Job %d ( length = %d, tickets = %d )' % (jobnum, runtime, tickets))
+# Initialize job list with clearer dictionary structure
+if args.jlist:
+    job_list = [
+        {"id": i, "runtime": int(rt), "tickets": int(tix)}
+        for i, entry in enumerate(args.jlist.split(","))
+        for rt, tix in [entry.split(":")]
+    ]
 else:
-    jobnum = 0
-    for entry in options.jlist.split(','):
-        (runtime, tickets) = entry.split(':')
-        joblist.append([jobnum, int(runtime), int(tickets)])
-        runTotal += int(runtime)
-        tickTotal += int(tickets)
-        jobnum += 1
-    for job in joblist:
-        print('  Job %d ( length = %d, tickets = %d )' % (job[0], job[1], job[2]))
-print('\n')
+    job_list = [
+        {
+            "id": i,
+            "runtime": random.randint(1, args.maxlen),
+            "tickets": random.randint(1, args.maxticket),
+        }
+        for i in range(args.jobs)
+    ]
 
-if options.solve == False:
-    print('Here is the set of random numbers you will need (at most):')
-    for i in range(runTotal):
-        r = int(random.random() * 1000001)
-        print('Random', r)
+for job in job_list:
+    print(
+        f"\tJob {job['id']} ( length = {job['runtime']}, tickets = {job['tickets']} )"
+    )
 
-if options.solve == True:
-    print('** Solutions **\n')
+# Calculate initial totals
+tick_total = sum(job["tickets"] for job in job_list)
+run_total = sum(job["runtime"] for job in job_list)
+print(f"\trunTotal = {run_total}, tickTotal = {tick_total}")
 
-    jobs  = len(joblist)
-    clock = 0
-    for i in range(runTotal):
-        r = int(random.random() * 1000001)
-        winner = int(r % tickTotal)
+# Active jobs list to avoid iterating over finished processes
+active_jobs = [job for job in job_list if job["runtime"] > 0]
+clock = 0
 
-        current = 0
-        for (job, runtime, tickets) in joblist:
-            current += tickets
-            if current > winner:
-                (wjob, wrun, wtix) = (job, runtime, tickets)
-                break
+while active_jobs:
+    r = random.randint(0, 1000000)
+    winner_ticket = r % tick_total
+    winner_job = None
 
-        print('Random', r, '-> Winning ticket %d (of %d) -> Run %d' % (winner, tickTotal, wjob))
-        # print('Winning ticket %d (of %d) -> Run %d' % (winner, tickTotal, wjob))
+    if args.solve:
+        print(f"Random {r} -> winning tickets {winner_ticket} of {tick_total}")
 
-        print('  Jobs:',)
-        for (job, runtime, tickets) in joblist:
-            if wjob == job:
-                wstr = '*'
-            else:
-                wstr = ' '
-
-            if runtime > 0:
-                tstr = tickets
-            else:
-                tstr = '---'
-            print(' (%s job:%d timeleft:%d tix:%s ) ' % (wstr, job, runtime, tstr), end='')
-        print('')
-
-        # now do the accounting
-        if wrun >= options.quantum:
-            wrun -= options.quantum
-        else:
-            wrun = 0
-
-        clock += options.quantum
-
-        # job completed!
-        if wrun == 0:
-            print('--> JOB %d DONE at time %d' % (wjob, clock))
-            tickTotal -= wtix
-            wtix = 0
-            jobs -= 1
-
-        # update job list
-        joblist[wjob] = (wjob, wrun, wtix)
-
-        if jobs == 0:
-            print('')
+    # Find the winning job
+    current_sum = 0
+    for job in active_jobs:
+        current_sum += job["tickets"]
+        if args.solve:
+            print(f"job {job['id']} cumulative tickets: {current_sum}")
+        if current_sum > winner_ticket:
+            winner_job = job
             break
 
+    if args.solve:
+        for job in job_list:
+            status = "*" if job is winner_job else " "
+            tix = job["tickets"] if job["runtime"] > 0 else "---"
+            print(
+                f"\t({status}job:{job['id']} timeleft:{job['runtime']} tickets:{tix} )"
+            )
 
+    if winner_job is None:
+        continue
 
+    clock += args.quantum
+    winner_job["runtime"] = max(0, winner_job["runtime"] - args.quantum)
 
+    is_done = winner_job["runtime"] == 0
+    if is_done:
+        tick_total -= winner_job["tickets"]
+        active_jobs.remove(winner_job)
+
+    print(
+        f"-> job {winner_job['id']} is running at time {clock} {'--> done' if is_done else ''}"
+    )

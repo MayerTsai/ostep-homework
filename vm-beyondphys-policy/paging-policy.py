@@ -1,284 +1,238 @@
-#! /usr/bin/env python
+#! /usr/bin/python3
 
-from __future__ import print_function
 import sys
-from optparse import OptionParser
+import collections
 import random
-import math
+import argparse
+import time
 
-# to make Python2 and Python3 act the same -- how dumb
-def random_seed(seed):
-    try:
-        random.seed(seed, version=1)
-    except:
-        random.seed(seed)
-    return
 
-def convert(size):
-    length = len(size)
-    lastchar = size[length-1]
-    if (lastchar == 'k') or (lastchar == 'K'):
-        m = 1024
-        nsize = int(size[0:length-1]) * m
-    elif (lastchar == 'm') or (lastchar == 'M'):
-        m = 1024*1024
-        nsize = int(size[0:length-1]) * m
-    elif (lastchar == 'g') or (lastchar == 'G'):
-        m = 1024*1024*1024
-        nsize = int(size[0:length-1]) * m
-    else:
-        nsize = int(size)
-    return nsize
-
-def hfunc(index):
-    if index == -1:
-        return 'MISS'
-    else:
-        return 'HIT '
-
+# Helper function to print victim page number or '-' if no victim
 def vfunc(victim):
     if victim == -1:
-        return '-'
+        return "-"
     else:
         return str(victim)
 
-#
-# main program
-#
-parser = OptionParser()
-parser.add_option('-a', '--addresses', default='-1',   help='a set of comma-separated pages to access; -1 means randomly generate',  action='store', type='string', dest='addresses')
-parser.add_option('-f', '--addressfile', default='',   help='a file with a bunch of addresses in it',                                action='store', type='string', dest='addressfile')
-parser.add_option('-n', '--numaddrs', default='10',    help='if -a (--addresses) is -1, this is the number of addrs to generate',    action='store', type='string', dest='numaddrs')
-parser.add_option('-p', '--policy', default='FIFO',    help='replacement policy: FIFO, LRU, OPT, UNOPT, RAND, CLOCK',                action='store', type='string', dest='policy')
-parser.add_option('-b', '--clockbits', default=2,      help='for CLOCK policy, how many clock bits to use',                          action='store', type='int', dest='clockbits')
-parser.add_option('-C', '--cachesize', default='3',    help='size of the page cache, in pages',                                      action='store', type='string', dest='cachesize')
-parser.add_option('-m', '--maxpage', default='10',     help='if randomly generating page accesses, this is the max page number',     action='store', type='string', dest='maxpage')
-parser.add_option('-s', '--seed', default='0',         help='random number seed',                                                    action='store', type='string', dest='seed')
-parser.add_option('-N', '--notrace', default=False,    help='do not print out a detailed trace',                                     action='store_true', dest='notrace')
-parser.add_option('-c', '--compute', default=False,    help='compute answers for me',                                                action='store_true', dest='solve')
 
-(options, args) = parser.parse_args()
+parser = argparse.ArgumentParser(description="Simulate page replacement policies.")
+parser.add_argument(
+    "-a",
+    "--addresses",
+    default="-1",
+    help="A set of comma-separated pages to access; -1 means randomly generate.",
+    type=str,
+)
+parser.add_argument(
+    "-f",
+    "--addressfile",
+    default="",
+    help="A file with a bunch of addresses in it.",
+    type=str,
+)
+parser.add_argument(
+    "-n",
+    "--numaddrs",
+    default="10",
+    help="If -a (--addresses) is -1, this is the number of addrs to generate.",
+    type=int,
+)
+parser.add_argument(
+    "-p",
+    "--policy",
+    default="FIFO",
+    help="Replacement policy: FIFO, LRU, OPT, UNOPT, RAND, CLOCK.",
+    type=str,
+)
+parser.add_argument(
+    "-b",
+    "--clockbits",
+    default=2,
+    help="For CLOCK policy, how many clock bits to use.",
+    type=int,
+)
+parser.add_argument(
+    "-C", "--cachesize", default="3", help="Size of the page cache, in pages.", type=int
+)  # Changed type to int
+parser.add_argument(
+    "-m",
+    "--maxpage",
+    default="10",
+    help="If randomly generating page accesses, this is the max page number.",
+    type=int,
+)
+parser.add_argument("-s", "--seed", default=0, help="Random number seed.", type=int)
+parser.add_argument(
+    "-N",
+    "--notrace",
+    default=False,
+    help="Do not print out a detailed trace.",
+    action="store_true",
+)
+parser.add_argument(
+    "-c",
+    "--compute",
+    default=False,
+    help="Compute answers for me.",
+    action="store_true",
+)
 
-print('ARG addresses', options.addresses)
-print('ARG addressfile', options.addressfile)
-print('ARG numaddrs', options.numaddrs)
-print('ARG policy', options.policy)
-print('ARG clockbits', options.clockbits)
-print('ARG cachesize', options.cachesize)
-print('ARG maxpage', options.maxpage)
-print('ARG seed', options.seed)
-print('ARG notrace', options.notrace)
-print('')
+args = parser.parse_args()
 
-addresses   = str(options.addresses)
-addressFile = str(options.addressfile)
-numaddrs    = int(options.numaddrs)
-cachesize   = int(options.cachesize)
-seed        = int(options.seed)
-maxpage     = int(options.maxpage)
-policy      = str(options.policy)
-notrace     = options.notrace
-clockbits   = int(options.clockbits)
+print("ARG addresses", args.addresses)
+print("ARG addressfile", args.addressfile)
+print("ARG numaddrs", args.numaddrs)
+print("ARG policy", args.policy)
+print("ARG clockbits", args.clockbits)
+print("ARG cachesize", args.cachesize)
+print("ARG maxpage", args.maxpage)
+print("ARG seed", args.seed)
+print("ARG notrace", args.notrace)
+print("")
 
-random_seed(seed)
+# Convert string arguments to appropriate types
+addresses = args.addresses
+addressFile = args.addressfile
+numaddrs = args.numaddrs
+cachesize = args.cachesize
+maxpage = args.maxpage
+policy = args.policy
+notrace = args.notrace
+clockbits = args.clockbits
+
+seed = args.seed if args.seed != 0 else int(time.time())
+random.seed(seed)
+
+policy_map = {
+    "FIFO": ("FirstIn", "Lastin "),
+    "LRU": ("LRU", "MRU"),
+    "MRU": ("LRU", "MRU"),
+    "CLOCK": ("LRU", "MRU"),
+    "OPT": ("Left ", "Right"),
+    "RAND": ("Left ", "Right"),
+    "UNOPT": ("Left ", "Right"),
+}
+
+if policy not in policy_map:
+    print(f"Policy {policy} is not yet implemented")
+    sys.exit(1)
 
 addrList = []
-if addressFile != '':
-    fd = open(addressFile)
-    for line in fd:
-        addrList.append(int(line))
-    fd.close()
+if addressFile != "":
+    with open(addressFile) as fd:
+        for line in fd:
+            addrList.append(int(line))
 else:
-    if addresses == '-1':
-        # need to generate addresses
-        for i in range(0,numaddrs):
-            n = int(maxpage * random.random())
-            addrList.append(n)
+    if addresses == "-1":
+        for i in range(0, numaddrs):
+            addrList.append(random.randrange(maxpage))
     else:
-        addrList = addresses.split(',')
+        addrList = [int(x) for x in addresses.split(",")]
 
-if options.solve == False:
-    print('Assuming a replacement policy of %s, and a cache of size %d pages,' % (policy, cachesize))
-    print('figure out whether each of the following page references hit or miss')
-    print('in the page cache.\n')
+if not args.compute:
+    print(
+        f"Assuming a replacement policy of {policy}, and a cache of size {cachesize} pages,"
+    )
+    print("figure out whether each of the following page references hit or miss")
+    print("in the page cache.\n")
 
-    for n in addrList:
-        print('Access: %d  Hit/Miss?  State of Memory?' % int(n))
-    print('')
+    for n_val in addrList:
+        print(f"Access: {n_val}  Hit/Miss?  State of Memory?")
+    print("")
+    sys.exit(0)
 
-else:
-    if notrace == False:
-        print('Solving...\n')
 
-    # init memory structure
-    count = 0
-    memory = []
-    hits = 0
-    miss = 0
+if not args.notrace:
+    print("Solving...\n")
 
-    if policy == 'FIFO':
-        leftStr = 'FirstIn'
-        riteStr = 'Lastin '
-    elif policy == 'LRU':
-        leftStr = 'LRU'
-        riteStr = 'MRU'
-    elif policy == 'MRU':
-        leftStr = 'LRU'
-        riteStr = 'MRU'
-    elif policy == 'OPT' or policy == 'RAND' or policy == 'UNOPT' or policy == 'CLOCK':
-        leftStr = 'Left '
-        riteStr = 'Right'
+# Pre-calculate page occurrences for OPT/UNOPT to optimize lookups from O(N) to O(1)
+occurrences = collections.defaultdict(collections.deque)
+if policy in ["OPT", "UNOPT"]:
+    for i, addr in enumerate(addrList):
+        occurrences[addr].append(i)
+    opt_func = max if policy == "OPT" else min
+
+# Initialize simulation state.
+memory = []
+is_ordered_policy = policy in ["LRU", "FIFO", "MRU"]
+memory_ordered = collections.OrderedDict() if is_ordered_policy else None
+mem_set = set()
+hits = 0
+miss = 0
+ref = {}
+clock_hand = 0
+
+
+leftStr, riteStr = policy_map[policy]
+
+# Main simulation loop: process each page access in the reference string
+for addrIndex, n in enumerate(addrList):
+    victim = -1
+
+    # 1. OPT/UNOPT Future-Peeking Preparation
+    if policy in ["OPT", "UNOPT"]:
+        occurrences[n].popleft()
+
+    # 2. Hit/Miss Detection
+    is_hit = n in mem_set
+
+    if is_hit:
+        hits += 1
+        if policy in ["LRU", "MRU"]:
+            memory_ordered.move_to_end(n)
     else:
-        print('Policy %s is not yet implemented' % policy)
-        exit(1)
+        miss += 1  # Cache Miss
 
-    # track reference bits for clock
-    ref   = {}
+        # 3. Eviction Logic (Only if cache is full)
+        if len(mem_set) == cachesize:
+            if policy in ["FIFO", "LRU"]:
+                victim, _ = memory_ordered.popitem(last=False)
+            elif policy == "MRU":
+                victim, _ = memory_ordered.popitem(last=True)
+            elif policy == "RAND":
+                victim = memory.pop(random.randrange(len(memory)))
+            elif policy == "CLOCK":
+                while True:
+                    page_at_hand = memory[clock_hand]
+                    if ref.get(page_at_hand, 0) == 0:
+                        victim = memory.pop(clock_hand)
+                        break
+                    ref[page_at_hand] = 0
+                    clock_hand = (clock_hand + 1) % len(memory)
+            elif policy in ["OPT", "UNOPT"]:
+                victim = opt_func(
+                    memory,
+                    key=lambda p: occurrences[p][0] if occurrences[p] else float("inf"),
+                )
+                memory.remove(victim)
 
-    cdebug = False
+        if victim != -1:
+            mem_set.remove(victim)
+            ref.pop(victim, None)
 
-    # need to generate addresses
-    addrIndex = 0
-    for nStr in addrList:
-        # first, lookup
-        n = int(nStr)
-        try:
-            idx = memory.index(n)
-            hits = hits + 1
-            if policy == 'LRU' or policy == 'MRU':
-                update = memory.remove(n)
-                memory.append(n) # puts it on MRU side
-        except:
-            idx = -1
-            miss = miss + 1
-
-        victim = -1        
-        if idx == -1:
-            # miss, replace?
-            # print('BUG count, cachesize:', count, cachesize)
-            if count == cachesize:
-                # must replace
-                if policy == 'FIFO' or policy == 'LRU':
-                    victim = memory.pop(0)
-                elif policy == 'MRU':
-                    victim = memory.pop(count-1)
-                elif policy == 'RAND':
-                    victim = memory.pop(int(random.random() * count))
-                elif policy == 'CLOCK':
-                    if cdebug:
-                        print('REFERENCE TO PAGE', n)
-                        print('MEMORY ', memory)
-                        print('REF (b)', ref)
-
-                    # hack: for now, do random
-                    # victim = memory.pop(int(random.random() * count))
-                    victim = -1
-                    while victim == -1:
-                        page = memory[int(random.random() * count)]
-                        if cdebug:
-                            print('  scan page:', page, ref[page])
-                        if ref[page] >= 1:
-                            ref[page] -= 1
-                        else:
-                            # this is our victim
-                            victim = page
-                            memory.remove(page)
-                            break
-
-                    # remove old page's ref count
-                    if page in memory:
-                        assert('BROKEN')
-                    del ref[victim]
-                    if cdebug:
-                        print('VICTIM', page)
-                        print('LEN', len(memory))
-                        print('MEM', memory)
-                        print('REF (a)', ref)
-
-                elif policy == 'OPT':
-                    maxReplace  = -1
-                    replaceIdx  = -1
-                    replacePage = -1
-                    # print('OPT: access %d, memory %s' % (n, memory) )
-                    # print('OPT: replace from FUTURE (%s)' % addrList[addrIndex+1:])
-                    for pageIndex in range(0,count):
-                        page = memory[pageIndex]
-                        # now, have page 'page' at index 'pageIndex' in memory
-                        whenReferenced = len(addrList)
-                        # whenReferenced tells us when, in the future, this was referenced
-                        for futureIdx in range(addrIndex+1,len(addrList)):
-                            futurePage = int(addrList[futureIdx])
-                            if page == futurePage:
-                                whenReferenced = futureIdx
-                                break
-                        # print('OPT: page %d is referenced at %d' % (page, whenReferenced))
-                        if whenReferenced >= maxReplace:
-                            # print('OPT: ??? updating maxReplace (%d %d %d)' % (replaceIdx, replacePage, maxReplace))
-                            replaceIdx  = pageIndex
-                            replacePage = page
-                            maxReplace  = whenReferenced
-                            # print('OPT: --> updating maxReplace (%d %d %d)' % (replaceIdx, replacePage, maxReplace))
-                    victim = memory.pop(replaceIdx)
-                    # print('OPT: replacing page %d (idx:%d) because I saw it in future at %d' % (victim, replaceIdx, whenReferenced))
-                elif policy == 'UNOPT':
-                    minReplace  = len(addrList) + 1
-                    replaceIdx  = -1
-                    replacePage = -1
-                    for pageIndex in range(0,count):
-                        page = memory[pageIndex]
-                        # now, have page 'page' at index 'pageIndex' in memory
-                        whenReferenced = len(addrList)
-                        # whenReferenced tells us when, in the future, this was referenced
-                        for futureIdx in range(addrIndex+1,len(addrList)):
-                            futurePage = int(addrList[futureIdx])
-                            if page == futurePage:
-                                whenReferenced = futureIdx
-                                break
-                        if whenReferenced < minReplace:
-                            replaceIdx  = pageIndex
-                            replacePage = page
-                            minReplace  = whenReferenced
-                    victim = memory.pop(replaceIdx)
-            else:
-                # miss, but no replacement needed (cache not full)
-                victim = -1
-                count = count + 1
-
-            # now add to memory
-            memory.append(n)
-            if cdebug:
-                print('LEN (a)', len(memory))
-            if victim != -1:
-                assert(victim not in memory)
-
-        # after miss processing, update reference bit
-        if n not in ref:
-            ref[n] = 1
+        # 4. Insertion Logic (New page into cache)
+        if is_ordered_policy:
+            memory_ordered[n] = True
         else:
-            ref[n] += 1
-            if ref[n] > clockbits:
-                ref[n] = clockbits
-        
-        if cdebug:
-            print('REF (a)', ref)
+            memory.append(n)
+        mem_set.add(n)
 
-        if notrace == False:
-            print('Access: %d  %s %s -> %12s <- %s Replaced:%s [Hits:%d Misses:%d]' % (n, hfunc(idx), leftStr, memory, riteStr, vfunc(victim), hits, miss))
-        addrIndex = addrIndex + 1
-        
-    print('')
-    print('FINALSTATS hits %d   misses %d   hitrate %.2f' % (hits, miss, (100.0*float(hits))/(float(hits)+float(miss))))
-    print('')
+    # 5. Simulation Housekeeping and Stats
+    if is_ordered_policy:
+        if not notrace:
+            memory = list(memory_ordered)
+    elif policy == "CLOCK" and victim != -1:
+        clock_hand %= len(memory) if memory else 1
 
+    ref[n] = min(ref.get(n, 0) + 1, clockbits)
 
+    if not notrace:
+        outcome = "HIT " if is_hit else "MISS"
+        print(
+            f"Access: {n}  {outcome} {leftStr} -> {str(memory):>12} <- {riteStr} Replaced:{vfunc(victim)} [Hits:{hits} Misses:{miss}]"
+        )
 
-    
-    
-    
-
-
-
-
-
-
-
+total = hits + miss
+hitrate = (100.0 * hits) / total if total > 0 else 0.0
+print(f"FINALSTATS hits {hits}   misses {miss}   hitrate {hitrate:.2f}")
+print("")

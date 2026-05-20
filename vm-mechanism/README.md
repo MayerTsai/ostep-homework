@@ -53,9 +53,9 @@ Virtual Address Trace
   VA  4: 0x0322 (decimal:802) -> PA or violation?
 ```
 
-For each virtual address, either write down the physical address it 
-translates to OR write down that it is an out-of-bounds address 
-(a segmentation violation). For this problem, you should assume a 
+For each virtual address, either write down the physical address it
+translates to OR write down that it is an out-of-bounds address
+(a segmentation violation). For this problem, you should assume a
 simple virtual address space of a given size.
 
 As you can see, the homework simply generates randomized virtual
@@ -90,7 +90,6 @@ Usage: relocation.py [options]
 
 Options:
   -h, --help            show this help message and exit
-  -s SEED, --seed=SEED  the random seed
   -a ASIZE, --asize=ASIZE address space size (e.g., 16, 64k, 32m)
   -p PSIZE, --physmem=PSIZE physical memory size (e.g., 16, 64k)
   -n NUM, --addresses=NUM # of virtual addresses to generate
@@ -103,4 +102,3 @@ In particular, you can control the virtual address-space size (-a), the size
 of physical memory (-p), the number of virtual addresses to generate (-n), and
 the values of the base and bounds registers for this process (-b and -l,
 respectively).
-
