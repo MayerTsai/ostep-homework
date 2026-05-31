@@ -1093,7 +1093,6 @@ verbose = args.verbose
 #
 # MAIN program
 #
-debug = False
 
 cpu = cpu(memsize, memtrace, regtrace, cctrace, args.solve, verbose)
 
