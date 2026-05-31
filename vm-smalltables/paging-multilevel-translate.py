@@ -1,272 +1,222 @@
-#! /usr/bin/env python
+#! /usr/bin/python3
 
-from __future__ import print_function
 import sys
-from optparse import OptionParser
 import random
-import math
+import argparse
 
-# to make Python2 and Python3 act the same -- how dumb
-def random_seed(seed):
-    try:
-        random.seed(seed, version=1)
-    except:
-        random.seed(seed)
-    return
 
-def convert(size):
-    length = len(size)
-    lastchar = size[length-1]
-    if (lastchar == 'k') or (lastchar == 'K'):
-        m = 1024
-        nsize = int(size[0:length-1]) * m
-    elif (lastchar == 'm') or (lastchar == 'M'):
-        m = 1024*1024
-        nsize = int(size[0:length-1]) * m
-    elif (lastchar == 'g') or (lastchar == 'G'):
-        m = 1024*1024*1024
-        nsize = int(size[0:length-1]) * m
-    else:
-        nsize = int(size)
-    return nsize
-
-def roundup(size):
-    value = 1.0
-    while value < size:
-        value = value * 2.0
-    return value
-
-    
 class OS:
+    VALID_BIT = 0x80  # 1000 0000
+    EMPTY_PTE_CONTENTS = 0x7F  # 0111 1111
+
     def __init__(self):
-        # 4k phys memory (128 pages)
-        self.pageSize  = 32
-        self.physPages = 128
-        self.physMem   = self.pageSize * self.physPages
-        self.vaPages   = 1024
-        self.vaSize    = self.pageSize * self.vaPages
-        self.pteSize   = 1
-        self.pageBits  = 5 # log of page size
+        # Simulation parameters: 4k physical memory (128 pages of 32 bytes)
+        self.page_size = 32  # log2(32)   = 5
+        self.phys_pages = 128  # log2(128)  = 7
+        self.phys_mem_size = self.page_size * self.phys_pages  # 32 x128
+        self.va_pages = 1024  # log2(1024) = 10
+        self.va_size = self.page_size * self.va_pages  # 32 x 1024
+        self.pte_size = 1
+        self.page_bits = 5  # log2(page_size = 32)
 
-        # os tracks
-        self.usedPages      = []
-        self.usedPagesCount = 0
-        self.maxPageCount   = int(self.physMem / self.pageSize)
+        # Optimized memory allocation tracking
+        self.free_pages = list(range(self.phys_pages))  # array with 128 elements
+        self.max_page_count = self.phys_pages
 
-        # no pages used (yet)
-        for i in range(0, self.maxPageCount):
-            self.usedPages.append(0)
+        # Physical memory initialization
+        self.memory = [0] * self.phys_mem_size
 
-        # set contents of memory to 0, too
-        self.memory = []
-        for i in range(0, self.physMem):
-            self.memory.append(0)
-
-        # associative array of pdbr's (indexed by PID)
+        # Page Directory Base Register per process
         self.pdbr = {}
 
-        # mask is 11111 00000 00000 --> 0111 1100 0000 0000 
-        self.PDE_MASK    = 0x7c00
-        self.PDE_SHIFT   = 10
+        # Multi-level bitmasking (15-bit address: 5-bit PDE, 5-bit PTE, 5-bit Offset)
+        self.PDE_MASK = 0x7C00  # 0111 1100 0000 0000
+        self.PDE_SHIFT = 10
+        self.PTE_MASK = 0x03E0  # 0000 0011 1110 0000
+        self.PTE_SHIFT = 5
+        self.OFFSET_MASK = 0x001F  # 0000 0000 0001 1111
 
-        # 00000 11111 00000 -> 000 0011 1110 0000
-        self.PTE_MASK    = 0x03e0
-        self.PTE_SHIFT   = 5
+    def find_free(self):
+        if not self.free_pages:
+            raise RuntimeError("Out of physical memory")
 
-        self.VPN_MASK    = self.PDE_MASK | self.PTE_MASK
-        self.VPN_SHIFT   = self.PTE_SHIFT
-
-        # grabs the last five bits of a virtual address
-        self.OFFSET_MASK = 0x1f
-
-    def findFree(self):
-        assert(self.usedPagesCount < self.maxPageCount)
-        look = int(random.random() * self.maxPageCount)
-        while self.usedPages[look] == 1:
-            look = int(random.random() * self.maxPageCount)
-        self.usedPagesCount = self.usedPagesCount + 1
-        self.usedPages[look] = 1
+        # O(1) random selection and removal from the pool
+        idx = random.randrange(len(self.free_pages))
+        self.free_pages[idx], self.free_pages[-1] = (
+            self.free_pages[-1],
+            self.free_pages[idx],
+        )
+        look = self.free_pages.pop()
         return look
 
-    def initPageDir(self, whichPage):
-        whichByte = whichPage << self.pageBits
-        for i in range(whichByte, whichByte + self.pageSize):
-            self.memory[i] = 0x7f
+    def init_page(self, page_number):
+        start = page_number << self.page_bits
+        self.memory[start : start + self.page_size] = [
+            self.EMPTY_PTE_CONTENTS
+        ] * self.page_size
 
-    def initPageTablePage(self, whichPage):
-        self.initPageDir(whichPage)
+    def get_pte(self, virtual_addr, pte_page, verbose):
+        pte_idx = (virtual_addr & self.PTE_MASK) >> self.PTE_SHIFT
+        pte_addr = (pte_page << self.page_bits) | pte_idx
+        pte = self.memory[pte_addr]
+        valid = (pte & self.VALID_BIT) >> 7
+        pfn = pte & 0x7F
+        if verbose:
+            print(
+                f"    --> pte index:0x{pte_idx:x} [decimal {pte_idx}] pte contents:0x{pte:x} "
+                f"(valid {valid}, pfn 0x{pfn:02x} [decimal {pfn}])"
+            )
+        return valid, pfn, pte_addr
 
-    def getPageTableEntry(self, virtualAddr, ptePage, printStuff):
-        pteBits = (virtualAddr & self.PTE_MASK) >> self.PTE_SHIFT
-        pteAddr = (ptePage << self.pageBits) | pteBits
-        pte     = self.memory[pteAddr]
-        valid   = (pte & 0x80) >> 7
-        pfn     = (pte & 0x7f)
-        if printStuff == True:
-            print('    --> pte index:0x%x [decimal %d] pte contents:0x%x (valid %d, pfn 0x%02x [decimal %d])' % (pteBits, pteBits, pte, valid, pfn, pfn))
-        return (valid, pfn, pteAddr)
+    def get_pde(self, pid, virtual_addr, verbose):
+        pd_page = self.pdbr[pid]
+        pde_idx = (virtual_addr & self.PDE_MASK) >> self.PDE_SHIFT
+        pde_addr = (pd_page << self.page_bits) | pde_idx
+        pde = self.memory[pde_addr]
+        valid = (pde & self.VALID_BIT) >> 7
+        pt_pfn = pde & 0x7F
+        if verbose:
+            print(
+                f"  --> pde index:0x{pde_idx:x} [decimal {pde_idx}] pde contents:0x{pde:x} "
+                f"(valid {valid}, pfn 0x{pt_pfn:02x} [decimal {pt_pfn}])"
+            )
+        return valid, pt_pfn, pde_addr
 
-    def getPageDirEntry(self, pid, virtualAddr, printStuff):
-        pageDir = self.pdbr[pid]
-        pdeBits = (virtualAddr & self.PDE_MASK) >> self.PDE_SHIFT
-        pdeAddr = (pageDir << self.pageBits) | pdeBits
-        pde     = self.memory[pdeAddr]
-        valid   = (pde & 0x80) >> 7
-        ptPtr   = (pde & 0x7f)
-        if printStuff == True:
-            print('  --> pde index:0x%x [decimal %d] pde contents:0x%x (valid %d, pfn 0x%02x [decimal %d])' % (pdeBits, pdeBits, pde, valid, ptPtr, ptPtr))
-        return (valid, ptPtr, pdeAddr)
+    def set_entry(self, entry_addr, physical_page):
+        self.memory[entry_addr] = self.VALID_BIT | physical_page
 
-    def setPageTableEntry(self, pteAddr, physicalPage):
-        self.memory[pteAddr] = 0x80 | physicalPage
+    def alloc_virtual_page(self, pid, virtual_page, physical_page):
+        virtual_addr = virtual_page << self.page_bits
+        valid, pt_pfn, pde_addr = self.get_pde(pid, virtual_addr, False)
 
-    def setPageDirEntry(self, pdeAddr, physicalPage):
-        self.memory[pdeAddr] = 0x80 | physicalPage
-        
-    def allocVirtualPage(self, pid, virtualPage, physicalPage):
-        # make it into a virtual address, as everything uses this (and not VPN)
-        virtualAddr = virtualPage << self.pageBits
-        (valid, ptPtr, pdeAddr) = self.getPageDirEntry(pid, virtualAddr, False)
-        if valid == 0:
-            # must allocate a page of the page table now, and have the PD point to it
-            assert(ptPtr == 127)
-            ptePage = self.findFree()
-            self.setPageDirEntry(pdeAddr, ptePage)
-            self.initPageTablePage(ptePage)
+        if not valid:
+            pte_page = self.find_free()
+            self.set_entry(pde_addr, pte_page)
+            self.init_page(pte_page)
         else:
-            # otherwise, just extract page number of page table page
-            ptePage = ptPtr
-        # now, look up page table entry too, and mark it valid and fill in translation
-        (valid, pfn, pteAddr) = self.getPageTableEntry(virtualAddr, ptePage, False)
-        assert(valid == 0)
-        assert(pfn == 127)
-        self.setPageTableEntry(pteAddr, physicalPage)
+            pte_page = pt_pfn
 
-    # -2 -> PTE fault, -1 means PDE fault
-    def translate(self, pid, virtualAddr):
-        (valid, ptPtr, pdeAddr) = self.getPageDirEntry(pid, virtualAddr, True)
-        if valid == 1:
-            ptePage = ptPtr
-            (valid, pfn, pteAddr) = self.getPageTableEntry(virtualAddr, ptePage, True)
-            if valid == 1:
-                offset = (virtualAddr & self.OFFSET_MASK)
-                paddr  = (pfn << self.pageBits) | offset
-		# print('     --> pfn: %02x  offset: %x' % (pfn, offset))
-                return paddr
-            else:
-                return -2
-        return -1
+        valid, pfn, pte_addr = self.get_pte(virtual_addr, pte_page, False)
+        assert not valid
+        self.set_entry(pte_addr, physical_page)
 
-    def fillPage(self, whichPage):
-        for j in range(0, self.pageSize):
-            self.memory[(whichPage * self.pageSize) + j] = int(random.random() * 31)
+    def translate(self, pid, virtual_addr):
+        valid, pt_pfn, _ = self.get_pde(pid, virtual_addr, True)
+        if not valid:
+            return -1  # PDE Fault
 
-    def procAlloc(self, pid, numPages):
-        # need a PDBR: find one somewhere in memory
-        pageDir = self.findFree()
-        # print('**ALLOCATE** page dir', pageDir)
-        self.pdbr[pid] = pageDir
-        self.initPageDir(pageDir)
+        valid, pfn, _ = self.get_pte(virtual_addr, pt_pfn, True)
+        if not valid:
+            return -2  # PTE Fault
 
-        used = {}
-        for vp in range(0, self.vaPages):
-            used[vp] = 0
-        allocatedVPs = []
-        
-        for vp in range(0, numPages):
-            vp = int(random.random() * self.vaPages)
-            while used[vp] == 1:
-                vp = int(random.random() * self.vaPages)
-            assert(used[vp] == 0)
-            used[vp] = 1
-            allocatedVPs.append(vp)
-            pp = self.findFree()
-            # print('**ALLOCATE** page', pp)
-            # print('  trying to map vp:%08x to pp:%08x' % (vp, pp))
-            self.allocVirtualPage(pid, vp, pp)
-            self.fillPage(pp)
-        return allocatedVPs
+        offset = virtual_addr & self.OFFSET_MASK
+        return (pfn << self.page_bits) | offset
 
-    def dumpPage(self, whichPage):
-        i = whichPage
-        for j in range(0, self.pageSize):
-            print(self.memory[(i * self.pageSize) + j], end='')
-        print('')
+    def fill_page_with_data(self, page_number):
+        start_idx = page_number * self.page_size
+        self.memory[start_idx : start_idx + self.page_size] = [
+            random.randint(0, 31) for _ in range(self.page_size)
+        ]
 
-    def memoryDump(self):
-        for i in range(0, int(self.physMem / self.pageSize)):
-            print('page %3d:' %  i, end='')
-            for j in range(0, self.pageSize):
-                print('%02x' % self.memory[(i * self.pageSize) + j], end='')
-            print('')
+    def allocate_process(self, pid, num_pages):
+        pd_page = self.find_free()
+        self.pdbr[pid] = pd_page
+        self.init_page(pd_page)
 
-    def getPDBR(self, pid):
+        # Optimization: random.sample is much faster than a collision-checking while loop
+        allocated_vps = random.sample(range(self.va_pages), num_pages)
+        for vp in allocated_vps:
+            pp = self.find_free()
+            self.alloc_virtual_page(pid, vp, pp)
+            self.fill_page_with_data(pp)
+        return allocated_vps
+
+    def memory_dump(self):
+        for i in range(self.phys_pages):
+            start = i * self.page_size
+            chunk = self.memory[start : start + self.page_size]
+            # Process memory in 2-byte chunks and join with spaces
+            hex_data = " ".join(
+                f"{chunk[j]:02x}{chunk[j+1]:02x}" for j in range(0, len(chunk), 2)
+            )
+            print(f"page {i:3d}: {hex_data}")
+
+    def get_pdbr(self, pid):
         return self.pdbr[pid]
 
-    def getValue(self, addr):
+    def get_value(self, addr):
         return self.memory[addr]
 
-# allocate some processes in memory
-# allocate some multi-level page tables in memory
-# make a bit of a mystery:
-# can examine PDBR (PFN of current proc's page directory)
-# can examine contents of any page
-# fill pages with values too
-# ask: when given
-#   LOAD VA, R1
-# what will final value will be loaded into R1?
 
-#
-# main program
-#
-parser = OptionParser()
-parser.add_option('-s', '--seed', default=0, help='the random seed', action='store', type='int', dest='seed')
-parser.add_option('-a', '--allocated', default=64, help='number of virtual pages allocated',
-                  action='store', type='int', dest='allocated')
-parser.add_option('-n', '--addresses', default=10, help='number of virtual addresses to generate',
-                  action='store', type='int', dest='num')
-parser.add_option('-c', '--solve', help='compute answers for me', action='store_true', default=False, dest='solve')
+def main():
+    parser = argparse.ArgumentParser(
+        description="Simulate multi-level page table translation."
+    )
+    parser.add_argument("-s", "--seed", default=0, type=int, help="Random seed")
+    parser.add_argument(
+        "-a",
+        "--allocated",
+        default=64,
+        type=int,
+        help="Number of virtual pages allocated",
+    )
+    parser.add_argument(
+        "-n",
+        "--addresses",
+        default=10,
+        type=int,
+        help="Number of virtual addresses to generate",
+    )
+    parser.add_argument(
+        "-c", "--solve", action="store_true", default=False, help="Compute answers"
+    )
 
+    args = parser.parse_args()
 
-(options, args) = parser.parse_args()
+    print(f"ARG seed {args.seed}")
+    print(f"ARG allocated {args.allocated}")
+    print(f"ARG num {args.addresses}")
+    print("")
 
-print('ARG seed', options.seed)
-print('ARG allocated',  options.allocated)
-print('ARG num',  options.num)
-print('')
+    random.seed(args.seed if args.seed > 0 else None)
 
-random_seed(options.seed)
+    simulation_os = OS()
+    used_vps = simulation_os.allocate_process(1, args.allocated)
+    simulation_os.memory_dump()
 
-# do the work now
-os = OS()
-used = os.procAlloc(1, options.allocated)
+    print(
+        f"\nPDBR: {simulation_os.get_pdbr(1)} (decimal) [This means the page directory is held in this page]\n"
+    )
 
-os.memoryDump()
-
-print('\nPDBR:', os.getPDBR(1), ' (decimal) [This means the page directory is held in this page]\n')
-
-for i in range(0, options.num):
-    if (random.random() * 100) > 50.0 or i >= len(used):
-        vaddr = int(random.random() * 1024 * 32)
-    else:
-        vaddr = (used[i] << 5) | int(random.random() * 32)
-    if options.solve == True:
-        print('Virtual Address 0x%04x:' % vaddr)
-        r = os.translate(1, vaddr)
-        if r > -1:
-            print('      --> Translates to Physical Address 0x%03x --> Value: 0x%02x' % (r, os.getValue(r)))
-        elif r == -1:
-            print('      --> Fault (page directory entry not valid)')
+    for i in range(args.addresses):
+        # Generate addresses: 50% chance of a random address, 50% chance of a validly allocated one.
+        if random.random() > 0.5 or i >= len(used_vps):
+            vaddr = random.randint(0, (1024 * 32) - 1)
         else:
-            print('      --> Fault (page table entry not valid)')
-    else:
-        print('Virtual Address %04x: Translates To What Physical Address (And Fetches what Value)? Or Fault?' % vaddr)
+            vaddr = (used_vps[i] << 5) | random.randint(0, 31)
 
-print('')
+        if args.solve:
+            print(f"Virtual Address 0x{vaddr:04x}:")
+            phys_addr = simulation_os.translate(1, vaddr)
+            if phys_addr >= 0:
+                print(
+                    f"      --> Translates to Physical Address 0x{phys_addr:03x} --> Value: 0x{simulation_os.get_value(phys_addr):02x}"
+                )
+            elif phys_addr == -1:
+                print("      --> Fault (page directory entry not valid)")
+            else:
+                print("      --> Fault (page table entry not valid)")
+        else:
+            print(
+                f"Virtual Address {vaddr:04x}: Translates To What Physical Address (And Fetches what Value)? Or Fault?"
+            )
 
-exit(0)
+    print("")
 
 
-
-
-
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)

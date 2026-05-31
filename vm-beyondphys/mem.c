@@ -30,8 +30,7 @@ int main(int argc, char *argv[])
     }
     long long int size_in_bytes = size * 1024 * 1024;
 
-    printf("allocating %lld bytes (%lld MB)\n",
-           size_in_bytes, size);
+    printf("allocating %lld bytes (%lld MB)\n", size_in_bytes, size);
 
     // the big memory allocation happens here
     int *x = malloc(size_in_bytes);
@@ -54,10 +53,7 @@ int main(int argc, char *argv[])
         // Using a tight inner loop allows the compiler to vectorize the increments
         // and removes the branching overhead from the hot path.
         for (long long int j = 0; j < num_ints; j++)
-        {
             x[j]++;
-        }
-
         double current_time = Time_GetSeconds();
         double delta_time = current_time - t;
 
@@ -68,7 +64,6 @@ int main(int argc, char *argv[])
                    loop_count, 1000 * delta_time, (double)size / delta_time);
             time_since_last_print = 0;
         }
-
         t = current_time;
         loop_count++;
     }

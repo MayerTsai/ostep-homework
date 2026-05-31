@@ -100,9 +100,6 @@ policy = args.policy
 notrace = args.notrace
 clockbits = args.clockbits
 
-seed = args.seed if args.seed != 0 else int(time.time())
-random.seed(seed)
-
 policy_map = {
     "FIFO": ("FirstIn", "Lastin "),
     "LRU": ("LRU", "MRU"),
@@ -116,6 +113,9 @@ policy_map = {
 if policy not in policy_map:
     print(f"Policy {policy} is not yet implemented")
     sys.exit(1)
+
+seed = args.seed if args.seed != 0 else int(time.time())
+random.seed(seed)
 
 addrList = []
 if addressFile != "":
@@ -140,7 +140,6 @@ if not args.compute:
         print(f"Access: {n_val}  Hit/Miss?  State of Memory?")
     print("")
     sys.exit(0)
-
 
 if not args.notrace:
     print("Solving...\n")
@@ -183,7 +182,7 @@ for addrIndex, n in enumerate(addrList):
     else:
         miss += 1  # Cache Miss
 
-        # 3. Eviction Logic (Only if cache is full)
+        # 3. Eviction Logic (when cache is full)
         if len(mem_set) == cachesize:
             if policy in ["FIFO", "LRU"]:
                 victim, _ = memory_ordered.popitem(last=False)

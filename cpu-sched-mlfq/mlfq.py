@@ -1,498 +1,302 @@
-#! /usr/bin/env python
+#! /usr/bin/python3
 
-from __future__ import print_function
 import sys
-from optparse import OptionParser
 import time
 import random
+from optparse import OptionParser
+from collections import deque
 
 
-# to make Python2 and Python3 act the same -- how dumb
-def random_seed(seed):
-    try:
-        random.seed(seed, version=1)
-    except:
-        random.seed(seed)
-    return
+class Job:
+    def __init__(self, id, start_time, run_time, io_freq, hi_pri, q_len, a_len):
+        self.id = id
+        self.start_time = start_time
+        self.run_time = run_time
+        self.io_freq = io_freq
+        self.curr_pri = hi_pri
+        self.ticks_left = q_len
+        self.allot_left = a_len
+        self.time_left = run_time
+        self.doing_io = False
+        self.first_run = -1
+        self.end_time = -1
+
+    def __repr__(self):
+        return f"Job {self.id}"
 
 
-# finds the highest nonempty queue
-# -1 if they are all empty
-def FindQueue():
-    q = hiQueue
-    while q > 0:
-        if len(queue[q]) > 0:
-            return q
-        q -= 1
-    if len(queue[0]) > 0:
-        return 0
-    return -1
+class Simulator:
+    def __init__(self, options):
+        self.options = options
+        self.seed = options.seed if options.seed != 0 else int(time.time())
+        random.seed(self.seed)
 
+        # Setup Queues
+        self.quantum = {}
+        self.allotment = {}
+        if options.quantumList != "":
+            lengths = [int(x) for x in options.quantumList.split(",")]
+            self.num_queues = len(lengths)
+            for i, length in enumerate(reversed(lengths)):
+                self.quantum[i] = length
+        else:
+            self.num_queues = options.numQueues
+            for i in range(self.num_queues):
+                self.quantum[i] = options.quantum
 
-def Abort(str):
-    sys.stderr.write(str + "\n")
-    exit(1)
+        if options.allotmentList != "":
+            lengths = [int(x) for x in options.allotmentList.split(",")]
+            if len(lengths) != self.num_queues:
+                print("Error: Allotment list length must match queue count.")
+                sys.exit(1)
+            for i, length in enumerate(reversed(lengths)):
+                self.allotment[i] = length
+        else:
+            for i in range(self.num_queues):
+                self.allotment[i] = options.allotment
 
+        self.hi_pri = self.num_queues - 1
+        self.queues = {i: deque() for i in range(self.num_queues)}
+        self.io_done = {}  # time -> list of (job_id, type)
+        self.jobs = {}
+        self._init_jobs()
 
-#
-# PARSE ARGUMENTS
-#
+    def _init_jobs(self):
+        job_cnt = 0
+        if self.options.jlist != "":
+            for entry in self.options.jlist.split(":"):
+                parts = entry.split(",")
+                if len(parts) != 3:
+                    print("Error: Job list format should be start,run,io:...")
+                    sys.exit(1)
+                start, run, io = map(int, parts)
+                self.jobs[job_cnt] = Job(
+                    job_cnt,
+                    start,
+                    run,
+                    io,
+                    self.hi_pri,
+                    self.quantum[self.hi_pri],
+                    self.allotment[self.hi_pri],
+                )
+                self.io_done.setdefault(start, []).append((job_cnt, "JOB BEGINS"))
+                job_cnt += 1
+        else:
+            for i in range(self.options.numJobs):
+                run = int(random.random() * (self.options.maxlen - 1) + 1)
+                io = int(random.random() * (self.options.maxio - 1) + 1)
+                self.jobs[i] = Job(
+                    i,
+                    0,
+                    run,
+                    io,
+                    self.hi_pri,
+                    self.quantum[self.hi_pri],
+                    self.allotment[self.hi_pri],
+                )
+                self.io_done.setdefault(0, []).append((i, "JOB BEGINS"))
 
-parser = OptionParser()
-parser.add_option(
-    "-s",
-    "--seed",
-    help="the random seed",
-    default=0,
-    action="store",
-    type="int",
-    dest="seed",
-)
-parser.add_option(
-    "-n",
-    "--numQueues",
-    help="number of queues in MLFQ (if not using -Q)",
-    default=3,
-    action="store",
-    type="int",
-    dest="numQueues",
-)
-parser.add_option(
-    "-q",
-    "--quantum",
-    help="length of time slice (if not using -Q)",
-    default=10,
-    action="store",
-    type="int",
-    dest="quantum",
-)
-parser.add_option(
-    "-a",
-    "--allotment",
-    help="length of allotment (if not using -A)",
-    default=1,
-    action="store",
-    type="int",
-    dest="allotment",
-)
-parser.add_option(
-    "-Q",
-    "--quantumList",
-    help="length of time slice per queue level, specified as "
-    + "x,y,z,... where x is the quantum length for the highest "
-    + "priority queue, y the next highest, and so forth",
-    default="",
-    action="store",
-    type="string",
-    dest="quantumList",
-)
-parser.add_option(
-    "-A",
-    "--allotmentList",
-    help="length of time allotment per queue level, specified as "
-    + "x,y,z,... where x is the # of time slices for the highest "
-    + "priority queue, y the next highest, and so forth",
-    default="",
-    action="store",
-    type="string",
-    dest="allotmentList",
-)
-parser.add_option(
-    "-j",
-    "--numJobs",
-    default=3,
-    help="number of jobs in the system",
-    action="store",
-    type="int",
-    dest="numJobs",
-)
-parser.add_option(
-    "-m",
-    "--maxlen",
-    default=100,
-    help="max run-time of a job " + "(if randomly generating)",
-    action="store",
-    type="int",
-    dest="maxlen",
-)
-parser.add_option(
-    "-M",
-    "--maxio",
-    default=10,
-    help="max I/O frequency of a job (if randomly generating)",
-    action="store",
-    type="int",
-    dest="maxio",
-)
-parser.add_option(
-    "-B",
-    "--boost",
-    default=0,
-    help="how often to boost the priority of all jobs back to " + "high priority",
-    action="store",
-    type="int",
-    dest="boost",
-)
-parser.add_option(
-    "-i",
-    "--iotime",
-    default=5,
-    help="how long an I/O should last (fixed constant)",
-    action="store",
-    type="int",
-    dest="ioTime",
-)
-parser.add_option(
-    "-S",
-    "--stay",
-    default=False,
-    help="reset and stay at same priority level when issuing I/O",
-    action="store_true",
-    dest="stay",
-)
-parser.add_option(
-    "-I",
-    "--iobump",
-    default=False,
-    help="if specified, jobs that finished I/O move immediately "
-    + "to front of current queue",
-    action="store_true",
-    dest="iobump",
-)
-parser.add_option(
-    "-l",
-    "--jlist",
-    default="",
-    help="a comma-separated list of jobs to run, in the form "
-    + "x1,y1,z1:x2,y2,z2:... where x is start time, y is run "
-    + "time, and z is how often the job issues an I/O request",
-    action="store",
-    type="string",
-    dest="jlist",
-)
-parser.add_option(
-    "-c",
-    help="compute answers for me",
-    action="store_true",
-    default=False,
-    dest="solve",
-)
+    def run(self):
+        print("Here is the list of inputs:")
+        print(f"OPTIONS jobs {len(self.jobs)}")
+        print(f"OPTIONS queues {self.num_queues}")
+        for i in range(self.num_queues - 1, -1, -1):
+            print(f"OPTIONS allotments for queue {i:2d} is {self.allotment[i]:3d}")
+            print(f"OPTIONS quantum length for queue {i:2d} is {self.quantum[i]:3d}")
+        print(f"OPTIONS boost {self.options.boost}")
+        print(f"OPTIONS ioTime {self.options.ioTime}")
+        print(f"OPTIONS stayAfterIO {self.options.stay}")
+        print(f"OPTIONS iobump {self.options.iobump}\n\n")
 
-(options, args) = parser.parse_args()
-
-seed = int(time.time())
-random.seed(seed)
-
-# MLFQ: How Many Queues
-numQueues = options.numQueues
-
-quantum = {}
-if options.quantumList != "":
-    # instead, extract number of queues and their time slic
-    quantumLengths = options.quantumList.split(",")
-    numQueues = len(quantumLengths)
-    qc = numQueues - 1
-    for i in range(numQueues):
-        quantum[qc] = int(quantumLengths[i])
-        qc -= 1
-else:
-    for i in range(numQueues):
-        quantum[i] = int(options.quantum)
-
-allotment = {}
-if options.allotmentList != "":
-    allotmentLengths = options.allotmentList.split(",")
-    if numQueues != len(allotmentLengths):
-        print("number of allotments specified must match number of quantums")
-        exit(1)
-    qc = numQueues - 1
-    for i in range(numQueues):
-        allotment[qc] = int(allotmentLengths[i])
-        if qc != 0 and allotment[qc] <= 0:
-            print("allotment must be positive integer")
-            exit(1)
-        qc -= 1
-else:
-    for i in range(numQueues):
-        allotment[i] = int(options.allotment)
-
-hiQueue = numQueues - 1
-
-# MLFQ: I/O Model
-# the time for each IO: not great to have a single fixed time but...
-ioTime = int(options.ioTime)
-
-# This tracks when IOs and other interrupts are complete
-ioDone = {}
-
-# This stores all info about the jobs
-job = {}
-
-# seed the random generator
-random_seed(seed)
-
-# jlist 'startTime,runTime,ioFreq:startTime,runTime,ioFreq:...'
-jobCnt = 0
-if options.jlist != "":
-    allJobs = options.jlist.split(":")
-    for j in allJobs:
-        jobInfo = j.split(",")
-        if len(jobInfo) != 3:
-            print("Badly formatted job string. Should be x1,y1,z1:x2,y2,z2:...")
+        print("Job List:")
+        for i, j in self.jobs.items():
             print(
-                "where x is the startTime, y is the runTime, and z is the I/O frequency."
+                f"  Job {i:2d}: startTime {j.start_time:3d} - runTime {j.run_time:3d} - ioFreq {j.io_freq:3d}"
             )
-            exit(1)
-        assert len(jobInfo) == 3
-        startTime = int(jobInfo[0])
-        runTime = int(jobInfo[1])
-        ioFreq = int(jobInfo[2])
-        job[jobCnt] = {
-            "currPri": hiQueue,
-            "ticksLeft": quantum[hiQueue],
-            "allotLeft": allotment[hiQueue],
-            "startTime": startTime,
-            "runTime": runTime,
-            "timeLeft": runTime,
-            "ioFreq": ioFreq,
-            "doingIO": False,
-            "firstRun": -1,
-        }
-        if startTime not in ioDone:
-            ioDone[startTime] = []
-        ioDone[startTime].append((jobCnt, "JOB BEGINS"))
-        jobCnt += 1
-else:
-    # do something random
-    for j in range(options.numJobs):
-        startTime = 0
-        runTime = int(random.random() * (options.maxlen - 1) + 1)
-        ioFreq = int(random.random() * (options.maxio - 1) + 1)
+        print("")
 
-        job[jobCnt] = {
-            "currPri": hiQueue,
-            "ticksLeft": quantum[hiQueue],
-            "allotLeft": allotment[hiQueue],
-            "startTime": startTime,
-            "runTime": runTime,
-            "timeLeft": runTime,
-            "ioFreq": ioFreq,
-            "doingIO": False,
-            "firstRun": -1,
-        }
-        if startTime not in ioDone:
-            ioDone[startTime] = []
-        ioDone[startTime].append((jobCnt, "JOB BEGINS"))
-        jobCnt += 1
+        if not self.options.solve:
+            print("Compute the execution trace for the given workloads.")
+            print("Use the -c flag to get the exact results when you are finished.\n")
+            sys.exit(0)
 
+        curr_time = 0
+        finished = 0
+        total = len(self.jobs)
 
-numJobs = len(job)
+        print("\nExecution Trace:\n")
+        while finished < total:
+            # 1. Priority Boost
+            if (
+                self.options.boost > 0
+                and curr_time > 0
+                and curr_time % self.options.boost == 0
+            ):
+                print(f"[ time {curr_time} ] BOOST ( every {self.options.boost} )")
+                for q in range(self.num_queues - 1):
+                    while self.queues[q]:
+                        j_id = self.queues[q].popleft()
+                        self.queues[self.hi_pri].append(j_id)
+                for j in self.jobs.values():
+                    if j.time_left > 0:
+                        j.curr_pri = self.hi_pri
+                        j.ticks_left = self.quantum[self.hi_pri]
+                        j.allot_left = self.allotment[self.hi_pri]
 
-print("Here is the list of inputs:")
-print("OPTIONS jobs", numJobs)
-print("OPTIONS queues", numQueues)
-for i in range(len(quantum) - 1, -1, -1):
-    print("OPTIONS allotments for queue %2d is %3d" % (i, allotment[i]))
-    print("OPTIONS quantum length for queue %2d is %3d" % (i, quantum[i]))
-print("OPTIONS boost", options.boost)
-print("OPTIONS ioTime", options.ioTime)
-print("OPTIONS stayAfterIO", options.stay)
-print("OPTIONS iobump", options.iobump)
+            # 2. Handle I/O completions and Job arrivals
+            if curr_time in self.io_done:
+                for j_id, event_type in self.io_done[curr_time]:
+                    j = self.jobs[j_id]
+                    j.doing_io = False
+                    print(f"[ time {curr_time} ] {event_type} by JOB {j_id}")
+                    q_list = self.queues[j.curr_pri]
+                    if not self.options.iobump or event_type == "JOB BEGINS":
+                        q_list.append(j_id)
+                    else:
+                        q_list.appendleft(j_id)
 
-print("\n")
-print("For each job, three defining characteristics are given:")
-print("  startTime : at what time does the job enter the system")
-print("  runTime   : the total CPU time needed by the job to finish")
-print("  ioFreq    : every ioFreq time units, the job issues an I/O")
-print("              (the I/O takes ioTime units to complete)\n")
+            # 3. Select Job
+            curr_q = -1
+            for q in range(self.hi_pri, -1, -1):
+                if self.queues[q]:
+                    curr_q = q
+                    break
 
-print("Job List:")
-for i in range(numJobs):
-    print(
-        "  Job %2d: startTime %3d - runTime %3d - ioFreq %3d"
-        % (i, job[i]["startTime"], job[i]["runTime"], job[i]["ioFreq"])
-    )
-print("")
+            if curr_q == -1:
+                print(f"[ time {curr_time} ] IDLE")
+                curr_time += 1
+                continue
 
-if options.solve == False:
-    print("Compute the execution trace for the given workloads.")
-    print("If you would like, also compute the response and turnaround")
-    print("times for each of the jobs.")
-    print("")
-    print("Use the -c flag to get the exact results when you are finished.\n")
-    exit(0)
+            # 4. Execute Job
+            j_id = self.queues[curr_q][0]
+            j = self.jobs[j_id]
+            if j.first_run == -1:
+                j.first_run = curr_time
 
-# initialize the MLFQ queues
-queue = {}
-for q in range(numQueues):
-    queue[q] = []
+            j.time_left -= 1
+            j.ticks_left -= 1
 
-# TIME IS CENTRAL
-currTime = 0
+            print(
+                f"[ time {curr_time} ] Run JOB {j_id} at PRIORITY {curr_q} "
+                f"[ TICKS {j.ticks_left} ALLOT {j.allot_left} TIME {j.time_left} (of {j.run_time}) ]"
+            )
 
-# use these to know when we're finished
-totalJobs = len(job)
-finishedJobs = 0
+            curr_time += 1
 
-print("\nExecution Trace:\n")
+            # 5. Post-Execution Logic
+            if j.time_left == 0:
+                print(f"[ time {curr_time} ] FINISHED JOB {j_id}")
+                finished += 1
+                j.end_time = curr_time
+                self.queues[curr_q].popleft()
+                continue
 
-while finishedJobs < totalJobs:
-    # find highest priority job
-    # run it until either
-    # (a) the job uses up its time quantum
-    # (b) the job performs an I/O
+            issued_io = False
+            if j.io_freq > 0 and ((j.run_time - j.time_left) % j.io_freq == 0):
+                print(f"[ time {curr_time} ] IO_START by JOB {j_id}")
+                issued_io = True
+                self.queues[curr_q].popleft()
+                j.doing_io = True
+                if self.options.stay:
+                    j.ticks_left = self.quantum[curr_q]
+                    j.allot_left = self.allotment[curr_q]
+                future = curr_time + self.options.ioTime
+                self.io_done.setdefault(future, []).append((j_id, "IO_DONE"))
 
-    # check for priority boost
-    if options.boost > 0 and currTime != 0:
-        if currTime % options.boost == 0:
-            print("[ time %d ] BOOST ( every %d )" % (currTime, options.boost))
-            # remove all jobs from queues (except high queue) and put them in high queue
-            for q in range(numQueues - 1):
-                for j in queue[q]:
-                    if job[j]["doingIO"] == False:
-                        queue[hiQueue].append(j)
-                queue[q] = []
+            if j.ticks_left == 0:
+                if not issued_io:
+                    self.queues[curr_q].popleft()
 
-            # change priority to high priority
-            # reset number of ticks left for all jobs (just for lower jobs?)
-            # add to highest run queue (if not doing I/O)
-            for j in range(numJobs):
-                # print('-> Boost %d (timeLeft %d)' % (j, job[j]['timeLeft']))
-                if job[j]["timeLeft"] > 0:
-                    # print('-> FinalBoost %d (timeLeft %d)' % (j, job[j]['timeLeft']))
-                    job[j]["currPri"] = hiQueue
-                    job[j]["ticksLeft"] = quantum[hiQueue]
-                    job[j]["allotLeft"] = allotment[hiQueue]
-                    # print('  BOOST', j, ' ticks:', job[j]['ticksLeft'], ' allot:', job[j]['allotLeft'])
-            # print('BOOST END: QUEUES look like:', queue)
+                j.allot_left -= 1
+                if j.allot_left == 0:
+                    # Demote or reset at bottom
+                    if j.curr_pri > 0:
+                        j.curr_pri -= 1
+                    j.ticks_left = self.quantum[j.curr_pri]
+                    j.allot_left = self.allotment[j.curr_pri]
+                else:
+                    # Stay at level, reset quantum
+                    j.ticks_left = self.quantum[j.curr_pri]
 
-    # check for any I/Os done
-    if currTime in ioDone:
-        for j, type in ioDone[currTime]:
-            q = job[j]["currPri"]
-            job[j]["doingIO"] = False
-            print("[ time %d ] %s by JOB %d" % (currTime, type, j))
-            if options.iobump == False or type == "JOB BEGINS":
-                queue[q].append(j)
-            else:
-                queue[q].insert(0, j)
+                if not issued_io:
+                    self.queues[j.curr_pri].append(j_id)
 
-    # now find the highest priority job
-    currQueue = FindQueue()
-    if currQueue == -1:
-        print("[ time %d ] IDLE" % (currTime))
-        currTime += 1
-        continue
+        self._print_stats()
 
-    # there was at least one runnable job, and hence ...
-    currJob = queue[currQueue][0]
-    if job[currJob]["currPri"] != currQueue:
-        Abort(
-            "currPri[%d] does not match currQueue[%d]"
-            % (job[currJob]["currPri"], currQueue)
+    def _print_stats(self):
+        print("\nFinal statistics:")
+        resp_sum = 0
+        turn_sum = 0
+        for i, j in self.jobs.items():
+            resp = j.first_run - j.start_time
+            turn = j.end_time - j.start_time
+            print(
+                f"  Job {i:2d}: startTime {j.start_time:3d} - response {resp:3d} - turnaround {turn:3d}"
+            )
+            resp_sum += resp
+            turn_sum += turn
+        n = len(self.jobs)
+        print(
+            f"\n  Avg {n-1:2d}: startTime n/a - response {resp_sum/n:.2f} - turnaround {turn_sum/n:.2f}\n"
         )
 
-    job[currJob]["timeLeft"] -= 1
-    job[currJob]["ticksLeft"] -= 1
 
-    if job[currJob]["firstRun"] == -1:
-        job[currJob]["firstRun"] = currTime
-
-    runTime = job[currJob]["runTime"]
-    ioFreq = job[currJob]["ioFreq"]
-    ticksLeft = job[currJob]["ticksLeft"]
-    allotLeft = job[currJob]["allotLeft"]
-    timeLeft = job[currJob]["timeLeft"]
-
-    print(
-        "[ time %d ] Run JOB %d at PRIORITY %d [ TICKS %d ALLOT %d TIME %d (of %d) ]"
-        % (currTime, currJob, currQueue, ticksLeft, allotLeft, timeLeft, runTime)
+def main():
+    parser = OptionParser()
+    parser.add_option("-s", "--seed", help="random seed", default=0, type="int")
+    parser.add_option(
+        "-n", "--numQueues", help="number of queues", default=3, type="int"
+    )
+    parser.add_option(
+        "-q", "--quantum", help="time slice length", default=10, type="int"
+    )
+    parser.add_option(
+        "-a", "--allotment", help="allotment length", default=1, type="int"
+    )
+    parser.add_option(
+        "-Q",
+        "--quantumList",
+        help="quantum length per level",
+        default="",
+        type="string",
+    )
+    parser.add_option(
+        "-A", "--allotmentList", help="allotment per level", default="", type="string"
+    )
+    parser.add_option("-j", "--numJobs", default=3, help="number of jobs", type="int")
+    parser.add_option("-m", "--maxlen", default=100, help="max run-time", type="int")
+    parser.add_option("-M", "--maxio", default=10, help="max I/O frequency", type="int")
+    parser.add_option(
+        "-B", "--boost", default=0, help="priority boost frequency", type="int"
+    )
+    parser.add_option(
+        "-i", "--iotime", default=5, help="I/O duration", type="int", dest="ioTime"
+    )
+    parser.add_option(
+        "-S",
+        "--stay",
+        default=False,
+        help="stay at priority on I/O",
+        action="store_true",
+    )
+    parser.add_option(
+        "-I",
+        "--iobump",
+        default=False,
+        help="move to front after I/O",
+        action="store_true",
+    )
+    parser.add_option(
+        "-l", "--jlist", default="", help="job list x,y,z:...", type="string"
+    )
+    parser.add_option(
+        "-c", help="compute answers", action="store_true", default=False, dest="solve"
     )
 
-    if timeLeft < 0:
-        Abort("Error: should never have less than 0 time left to run")
-
-    # UPDATE TIME
-    currTime += 1
-
-    # CHECK FOR JOB ENDING
-    if timeLeft == 0:
-        print("[ time %d ] FINISHED JOB %d" % (currTime, currJob))
-        finishedJobs += 1
-        job[currJob]["endTime"] = currTime
-        # print('BEFORE POP', queue)
-        done = queue[currQueue].pop(0)
-        # print('AFTER POP', queue)
-        assert done == currJob
-        continue
-
-    # CHECK FOR IO
-    issuedIO = False
-    if ioFreq > 0 and (((runTime - timeLeft) % ioFreq) == 0):
-        # time for an IO!
-        print("[ time %d ] IO_START by JOB %d" % (currTime, currJob))
-        issuedIO = True
-        desched = queue[currQueue].pop(0)
-        assert desched == currJob
-        job[currJob]["doingIO"] = True
-        # this does the bad rule -- reset your time at this level if you do I/O
-        if options.stay == True:
-            job[currJob]["ticksLeft"] = quantum[currQueue]
-            job[currJob]["allotLeft"] = allotment[currQueue]
-        # add to IO Queue: but which queue?
-        futureTime = currTime + ioTime
-        if futureTime not in ioDone:
-            ioDone[futureTime] = []
-        print("IO DONE")
-        ioDone[futureTime].append((currJob, "IO_DONE"))
-
-    # CHECK FOR QUANTUM ENDING AT THIS LEVEL (BUT REMEMBER, THERE STILL MAY BE ALLOTMENT LEFT)
-    if ticksLeft == 0:
-        if issuedIO == False:
-            # IO HAS NOT BEEN ISSUED (therefor pop from queue)'
-            desched = queue[currQueue].pop(0)
-        assert desched == currJob
-
-        job[currJob]["allotLeft"] = job[currJob]["allotLeft"] - 1
-
-        if job[currJob]["allotLeft"] == 0:
-            # this job is DONE at this level, so move on
-            if currQueue > 0:
-                # in this case, have to change the priority of the job
-                job[currJob]["currPri"] = currQueue - 1
-                job[currJob]["ticksLeft"] = quantum[currQueue - 1]
-                job[currJob]["allotLeft"] = allotment[currQueue - 1]
-                if issuedIO == False:
-                    queue[currQueue - 1].append(currJob)
-            else:
-                job[currJob]["ticksLeft"] = quantum[currQueue]
-                job[currJob]["allotLeft"] = allotment[currQueue]
-                if issuedIO == False:
-                    queue[currQueue].append(currJob)
-        else:
-            # this job has more time at this level, so just push it to end
-            job[currJob]["ticksLeft"] = quantum[currQueue]
-            if issuedIO == False:
-                queue[currQueue].append(currJob)
+    options, _ = parser.parse_args()
+    sim = Simulator(options)
+    sim.run()
 
 
-# print out statistics
-print("")
-print("Final statistics:")
-responseSum = 0
-turnaroundSum = 0
-for i in range(numJobs):
-    response = job[i]["firstRun"] - job[i]["startTime"]
-    turnaround = job[i]["endTime"] - job[i]["startTime"]
-    print(
-        "  Job %2d: startTime %3d - response %3d - turnaround %3d"
-        % (i, job[i]["startTime"], response, turnaround)
-    )
-    responseSum += response
-    turnaroundSum += turnaround
-
-print(
-    "\n  Avg %2d: startTime n/a - response %.2f - turnaround %.2f"
-    % (i, float(responseSum) / numJobs, float(turnaroundSum) / numJobs)
-)
-print("\n")
+if __name__ == "__main__":
+    main()

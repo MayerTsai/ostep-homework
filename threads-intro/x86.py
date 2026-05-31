@@ -1,172 +1,164 @@
-#! /usr/bin/env python
+#! /usr/bin/python3
 
-from __future__ import print_function
 import sys
 import time
 import random
-from optparse import OptionParser
+import argparse
 
-# to make Python2 and Python3 act the same -- how dumb
-def random_seed(seed):
-    try:
-        random.seed(seed, version=1)
-    except:
-        random.seed(seed)
-    return
 
 def time_clock():
-    try:
-        rc = time_clock()
-    except:
-        rc = time.process_time()
-    return rc
+    return time.process_time()
 
-#
-# HELPER
-#
+
 def dospace(howmuch):
-    for i in range(howmuch):
-        print('%24s' % ' ', end=' ')
+    print(" " * (25 * howmuch), end="")
 
-# useful instead of assert
-def zassert(cond, str):
-    if cond == False:
-        print('ABORT::', str)
+
+# Custom assert for runtime errors
+def zassert(cond, msg):
+    if not cond:
+        print("ABORT::", msg)
         exit(1)
-    return
+    return True
+
 
 class cpu:
-    #
-    # INIT: how much memory?
-    #
+    """x86 CPU Simulator"""
+
     def __init__(self, memory, memtrace, regtrace, cctrace, compute, verbose):
         #
         # CONSTANTS
         #
-        
+
         # conditions
-        self.COND_GT        = 0
-        self.COND_GTE       = 1
-        self.COND_LT        = 2
-        self.COND_LTE       = 3
-        self.COND_EQ        = 4
-        self.COND_NEQ       = 5
+        self.COND_GT = 0
+        self.COND_GTE = 1
+        self.COND_LT = 2
+        self.COND_LTE = 3
+        self.COND_EQ = 4
+        self.COND_NEQ = 5
 
         # registers in system
-        self.REG_ZERO       = 0
-        self.REG_AX         = 1
-        self.REG_BX         = 2
-        self.REG_CX         = 3
-        self.REG_DX         = 4
-        self.REG_SP         = 5
-        self.REG_BP         = 6
+        self.REG_ZERO = 0
+        self.REG_AX = 1
+        self.REG_BX = 2
+        self.REG_CX = 3
+        self.REG_DX = 4
+        self.REG_SP = 5
+        self.REG_BP = 6
 
         # system memory: in KB
-        self.max_memory     = memory * 1024
+        self.max_memory = memory * 1024
 
         # which memory addrs and registers to trace?
-        self.memtrace       = memtrace
-        self.regtrace       = regtrace
-        self.cctrace        = cctrace
-        self.compute        = compute
-        self.verbose        = verbose
+        self.memtrace = memtrace
+        self.regtrace = regtrace
+        self.cctrace = cctrace
+        self.compute = compute
+        self.verbose = verbose
 
-        self.PC             = 0
-        self.registers      = {}
-        self.conditions     = {}
-        self.labels         = {}
-        self.vars           = {}
-        self.memory         = {}
-        self.pmemory        = {}  # for printable version of what's in memory (instructions)
+        self.PC = 0
+        self.labels = {}
+        self.vars = {}
+        self.registers = [0] * 7
+        self.conditions = [False] * 6
+        self.memory = []
+        self.pmemory = []  # for printable version of what's in memory (instructions)
 
-        self.condlist       = [self.COND_GTE, self.COND_GT, self.COND_LTE, self.COND_LT, self.COND_NEQ, self.COND_EQ]
-        self.regnums        = [self.REG_ZERO, self.REG_AX,  self.REG_BX,   self.REG_CX,  self.REG_DX,   self.REG_SP,  self.REG_BP]
+        self.condlist = [
+            self.COND_GTE,
+            self.COND_GT,
+            self.COND_LTE,
+            self.COND_LT,
+            self.COND_NEQ,
+            self.COND_EQ,
+        ]
 
-        self.regnames         = {}
-        self.regnames['zero'] = self.REG_ZERO # hidden zero-valued register
-        self.regnames['ax']   = self.REG_AX
-        self.regnames['bx']   = self.REG_BX
-        self.regnames['cx']   = self.REG_CX
-        self.regnames['dx']   = self.REG_DX
-        self.regnames['sp']   = self.REG_SP
-        self.regnames['bp']   = self.REG_BP
+        self.regnums = [
+            self.REG_ZERO,
+            self.REG_AX,
+            self.REG_BX,
+            self.REG_CX,
+            self.REG_DX,
+            self.REG_SP,
+            self.REG_BP,
+        ]
+
+        self.regnames = {
+            "zero": self.REG_ZERO,
+            "ax": self.REG_AX,
+            "bx": self.REG_BX,
+            "cx": self.REG_CX,
+            "dx": self.REG_DX,
+            "sp": self.REG_SP,
+            "bp": self.REG_BP,
+        }
+        self.rev_regnames = {v: k for k, v in self.regnames.items()}
+
+        # Pre-resolved trace information for performance
+        self.resolved_memtrace = []
+        self.resolved_regtrace = []
 
         tmplist = []
         for r in self.regtrace:
-            zassert(r in self.regnames, 'Register %s cannot be traced because it does not exist' % r)
+            assert r in self.regnames, f"Register {r} cannot be traced"
             tmplist.append(self.regnames[r])
-        self.regtrace = tmplist
+        self.resolved_regtrace = tmplist
 
         self.init_memory()
         self.init_registers()
         self.init_condition_codes()
 
-    #
-    # BEFORE MACHINE RUNS
-    #
     def init_condition_codes(self):
         for c in self.condlist:
             self.conditions[c] = False
 
     def init_memory(self):
-        for i in range(self.max_memory):
-            self.memory[i] = 0
+        self.memory = [0] * self.max_memory
+        self.pmemory = [""] * self.max_memory
 
     def init_registers(self):
         for i in self.regnums:
             self.registers[i] = 0
 
-    def dump_memory(self):
-        print('MEMORY DUMP')
-        for i in range(self.max_memory):
-            if i not in self.pmemory and i in self.memory and self.memory[i] != 0:
-                print('  m[%d]' % i, self.memory[i])
+    def _resolve_traces(self):
+        """Pre-resolve trace targets to avoid lookups during simulation loop."""
+        self.resolved_memtrace = []
+        for m in self.memtrace:
+            addr = int(m) if m[0].isdigit() else self.vars.get(m)
+            if addr is not None:
+                self.resolved_memtrace.append((m, addr))
 
-    #
-    # INFORMING ABOUT THE HARDWARE
-    #
     def get_regnum(self, name):
-        assert(name in self.regnames)
+        assert name in self.regnames
         return self.regnames[name]
 
     def get_regname(self, num):
-        assert(num in self.regnums)
-        for rname in self.regnames:
-            if self.regnames[rname] == num:
-                return rname
-        return ''
-    
-    def get_regnums(self):
-        return self.regnums
-
-    def get_condlist(self):
-        return self.condlist
+        assert num in self.regnums
+        return self.rev_regnames[num]
 
     def get_reg(self, reg):
-        assert(reg in self.regnums)
+        assert reg in self.regnums
         return self.registers[reg]
 
     def get_cond(self, cond):
-        assert(cond in self.condlist)
+        assert cond in self.condlist
         return self.conditions[cond]
 
     def get_pc(self):
         return self.PC
-        
+
     def set_reg(self, reg, value):
-        assert(reg in self.regnums)
+        assert reg in self.regnums
         self.registers[reg] = value
 
     def set_cond(self, cond, value):
-        assert(cond in self.condlist)
+        assert cond in self.condlist
         self.conditions[cond] = value
 
     def set_pc(self, pc):
         self.PC = pc
-        
-    #
-    # INSTRUCTIONS
-    #
+
     def halt(self):
         return -1
 
@@ -177,14 +169,15 @@ class cpu:
         return 0
 
     def rdump(self):
-        print('REGISTERS::', end=' ')
-        print('ax:', self.registers[self.REG_AX], end=' ')
-        print('bx:', self.registers[self.REG_BX], end=' ')
-        print('cx:', self.registers[self.REG_CX], end=' ')
-        print('dx:', self.registers[self.REG_DX], end=' ')
+        regs = self.registers
+        print(
+            f"REGISTERS:: ax:{regs[1]} bx:{regs[2]} cx:{regs[3]} dx:{regs[4]}", end=" "
+        )
+        return 0
 
     def mdump(self, index):
-        print('m[%d] ' % index, self.memory[index])
+        print(f"m[{index}] {self.memory[index]}")
+        return 0
 
     def move_i_to_r(self, src, dst):
         self.registers[dst] = src
@@ -192,72 +185,66 @@ class cpu:
 
     # memory: value, register, register
     def move_i_to_m(self, src, value, reg1, reg2):
-        tmp = value + self.registers[reg1] + self.registers[reg2]
-        self.memory[tmp] = src
+        addr = value + self.registers[reg1] + self.registers[reg2]
+        self.memory[addr] = src
         return 0
 
     def move_m_to_r(self, value, reg1, reg2, dst):
-        tmp = value + self.registers[reg1] + self.registers[reg2]
-        # print 'doing mov', 'val:', value, 'r1:', self.get_regname(reg1), self.registers[reg1], 'r2:', self.get_regname(reg2), self.registers[reg2], 'dst', self.get_regname(dst), 'tmp', tmp, 'reg[dst]', self.registers[dst], 'mem', self.memory[tmp]
-        self.registers[dst] = self.memory[tmp] 
+        addr = value + self.registers[reg1] + self.registers[reg2]
+        self.registers[dst] = self.memory[addr]
+        return 0
 
     def move_r_to_m(self, src, value, reg1, reg2):
-        tmp = value + self.registers[reg1] + self.registers[reg2]
-        self.memory[tmp] = self.registers[src]
+        addr = value + self.registers[reg1] + self.registers[reg2]
+        self.memory[addr] = self.registers[src]
         return 0
 
     def move_r_to_r(self, src, dst):
         self.registers[dst] = self.registers[src]
         return 0
 
-    def add_i_to_r(self, src, dst):
+    def add_i_r(self, src, dst):
         self.registers[dst] += src
         return 0
 
-    def add_r_to_r(self, src, dst):
+    def add_r_r(self, src, dst):
         self.registers[dst] += self.registers[src]
         return 0
 
-    def sub_i_to_r(self, src, dst):
+    def sub_i_r(self, src, dst):
         self.registers[dst] -= src
         return 0
 
-    def sub_r_to_r(self, src, dst):
+    def sub_r_r(self, src, dst):
         self.registers[dst] -= self.registers[src]
         return 0
 
-
-    #
-    # SUPPORT FOR LOCKS
-    #
     def atomic_exchange(self, src, value, reg1, reg2):
-        tmp                 = value + self.registers[reg1] + self.registers[reg2]
-        old                 = self.memory[tmp]
-        self.memory[tmp]    = self.registers[src]
+        tmp = value + self.registers[reg1] + self.registers[reg2]
+        old = self.memory[tmp]
+        self.memory[tmp] = self.registers[src]
         self.registers[src] = old
         return 0
 
     def fetchadd(self, src, value, reg1, reg2):
-        tmp                 = value + self.registers[reg1] + self.registers[reg2]
-        old                 = self.memory[tmp]
-        self.memory[tmp]    = self.memory[tmp] + self.registers[src] 
+        tmp = value + self.registers[reg1] + self.registers[reg2]
+        old = self.memory[tmp]
+        self.memory[tmp] = self.memory[tmp] + self.registers[src]
         self.registers[src] = old
+        return 0
 
-    #
-    # TEST for conditions
-    #
     def test_all(self, src, dst):
         self.init_condition_codes()
         if dst > src:
-            self.conditions[self.COND_GT]  = True
+            self.conditions[self.COND_GT] = True
         if dst >= src:
             self.conditions[self.COND_GTE] = True
         if dst < src:
-            self.conditions[self.COND_LT]  = True
+            self.conditions[self.COND_LT] = True
         if dst <= src:
             self.conditions[self.COND_LTE] = True
         if dst == src:
-            self.conditions[self.COND_EQ]  = True
+            self.conditions[self.COND_EQ] = True
         if dst != src:
             self.conditions[self.COND_NEQ] = True
         return 0
@@ -274,13 +261,10 @@ class cpu:
         self.init_condition_codes()
         return self.test_all(self.registers[src], self.registers[dst])
 
-    #
-    # JUMPS
-    #
     def jump(self, targ):
-        self.PC = targ  
+        self.PC = targ
         return 0
-    
+
     def jump_notequal(self, targ):
         if self.conditions[self.COND_NEQ] == True:
             self.PC = targ
@@ -316,12 +300,14 @@ class cpu:
     #
     def call(self, targ):
         self.registers[self.REG_SP] -= 4
-        self.memory[self.registers[self.REG_SP]] = self.PC 
+        self.memory[self.registers[self.REG_SP]] = self.PC
         self.PC = targ
+        return 0
 
     def ret(self):
         self.PC = self.memory[self.registers[self.REG_SP]]
         self.registers[self.REG_SP] += 4
+        return 0
 
     #
     # STACK and related
@@ -341,25 +327,25 @@ class cpu:
 
     def pop(self):
         self.registers[self.REG_SP] += 4
+        return 0
 
     def pop_r(self, dst):
         self.registers[dst] = self.registers[self.REG_SP]
         self.registers[self.REG_SP] += 4
+        return 0
 
     #
     # HELPER func for getarg
     #
     def register_translate(self, r):
-        if r in self.regnames:
-            return self.regnames[r]
-        zassert(False, 'Register %s is not a valid register' % r)
-        return
+        assert r in self.regnames, f"Register {r} is not a valid register"
+        return self.regnames[r]
 
     #
     # HELPER in parsing mov (quite primitive) and other ops
     # returns: (value, type)
     # where type is (TYPE_REGISTER, TYPE_IMMEDIATE, TYPE_MEMORY)
-    # 
+    #
     # FORMATS
     #    %ax           - register
     #    $10           - immediate
@@ -369,429 +355,513 @@ class cpu:
     #    10(%ax,%bx,4) - XXX (not handled)
     #
     def getarg(self, arg):
-        tmp1 = arg.replace(',', '')
-        tmp  = tmp1.replace(' \t', '')
+        tmp = "".join(arg.split()).replace(",", "")
+        if not tmp:
+            return None, "TYPE_NONE"
 
-        if tmp[0] == '$':
-            zassert(len(tmp) == 2, 'correct form is $number (not %s)' % tmp)
-            value = tmp.split('$')[1]
-            zassert(value.isdigit(), 'value [%s] must be a digit' % value)
-            return int(value), 'TYPE_IMMEDIATE'
-        elif tmp[0] == '%':
-            register = tmp.split('%')[1]
-            return self.register_translate(register), 'TYPE_REGISTER'
-        elif tmp[0] == '(':
-            register = tmp.split('(')[1].split(')')[0].split('%')[1]
-            return '%d,%d,%d' % (0, self.register_translate(register), self.register_translate('zero')), 'TYPE_MEMORY'
-        elif tmp[0] == '.':
+        if tmp[0] == "$":
+            val_str = tmp[1:]
+            try:
+                return int(val_str), "TYPE_IMMEDIATE"
+            except ValueError:
+                zassert(False, "Immediate value [%s] must be an integer" % tmp)
+        elif tmp[0] == "%":
+            register = tmp.split("%")[1]
+            return self.register_translate(register), "TYPE_REGISTER"
+        elif tmp[0] == "(":
+            register = tmp.split("(")[1].split(")")[0].split("%")[1]
+            return (
+                (0, self.register_translate(register), self.register_translate("zero")),
+                "TYPE_MEMORY",
+            )
+        elif tmp[0] == ".":
             targ = tmp
-            return targ, 'TYPE_LABEL'
+            return targ, "TYPE_LABEL"
         elif tmp[0].isalpha() and not tmp[0].isdigit():
-            zassert(tmp in self.vars, 'Variable %s is not declared' % tmp)
-            # print '%d,%d,%d' % (self.vars[tmp], self.register_translate('zero'), self.register_translate('zero')), 'TYPE_MEMORY'
-            return '%d,%d,%d' % (self.vars[tmp], self.register_translate('zero'), self.register_translate('zero')), 'TYPE_MEMORY'
-        elif tmp[0].isdigit() or tmp[0] == '-':
+            zassert(tmp in self.vars, "Variable %s is not declared" % tmp)
+            return (
+                (
+                    self.vars[tmp],
+                    self.register_translate("zero"),
+                    self.register_translate("zero"),
+                ),
+                "TYPE_MEMORY",
+            )
+        elif tmp[0].isdigit() or tmp[0] == "-":
             # MOST GENERAL CASE: number(reg,reg) or number(reg)
             # we ignore the common x86 number(reg,reg,constant) for now
             neg = 1
-            if tmp[0] == '-':
+            if tmp[0] == "-":
                 tmp = tmp[1:]
                 neg = -1
-            s = tmp.split('(')
+            s = tmp.split("(")
             if len(s) == 1:
                 value = neg * int(tmp)
-                # print '%d,%d,%d' % (int(value), self.register_translate('zero'), self.register_translate('zero')), 'TYPE_MEMORY'
-                return '%d,%d,%d' % (int(value), self.register_translate('zero'), self.register_translate('zero')), 'TYPE_MEMORY'
+                return (
+                    (
+                        int(value),
+                        self.register_translate("zero"),
+                        self.register_translate("zero"),
+                    ),
+                    "TYPE_MEMORY",
+                )
             elif len(s) == 2:
                 value = neg * int(s[0])
-                t = s[1].split(')')[0].split(',')
+                t = s[1].split(")")[0].split(",")
                 if len(t) == 1:
-                    register = t[0].split('%')[1]
-                    # print '%d,%d,%d' % (int(value), self.register_translate(register), self.register_translate('zero')), 'TYPE_MEMORY'
-                    return '%d,%d,%d' % (int(value), self.register_translate(register), self.register_translate('zero')), 'TYPE_MEMORY'
+                    register = t[0].split("%")[1]
+                    return (
+                        (
+                            int(value),
+                            self.register_translate(register),
+                            self.register_translate("zero"),
+                        ),
+                        "TYPE_MEMORY",
+                    )
                 elif len(t) == 2:
-                    register1 = t[0].split('%')[1]
-                    register2 = t[1].split('%')[1]
-                    # print '%d,%d,%d' % (int(value), self.register_translate(register1), self.register_translate(register2)), 'TYPE_MEMORY'
-                    return '%d,%d,%d' % (int(value), self.register_translate(register1), self.register_translate(register2)), 'TYPE_MEMORY'
+                    register1 = t[0].split("%")[1]
+                    register2 = t[1].split("%")[1]
+                    return (
+                        (
+                            int(value),
+                            self.register_translate(register1),
+                            self.register_translate(register2),
+                        ),
+                        "TYPE_MEMORY",
+                    )
             else:
-                print('mov: bad argument [%s]' % tmp)
+                print("mov: bad argument [%s]" % tmp)
                 exit(1)
                 return
-        zassert(True, 'mov: bad argument [%s]' % arg)
+        zassert(True, "mov: bad argument [%s]" % arg)
         return
 
-    #
-    # LOAD a program into memory
-    # make it ready to execute
-    #
     def load(self, infile, loadaddr):
-        pc   = int(loadaddr)
-        fd   = open(infile)
+        """Load a program into memory and pre-parse instructions into tuples."""
+        pc = int(loadaddr)
+        fd = open(infile)
 
-        bpc  = loadaddr
+        bpc = loadaddr
         data = 100
 
         for line in fd:
             cline = line.rstrip()
-            # print 'PASS 1', cline
 
-            # remove everything after the comment marker
-            ctmp = cline.split('#')
-            assert(len(ctmp) == 1 or len(ctmp) == 2)
-            if len(ctmp) == 2:
-                cline = ctmp[0]
-
-            # remove empty lines, and split line by spaces
-            tmp = cline.split()
-            if len(tmp) == 0:
+            if cline.startswith(("#", "//")) or not cline:
                 continue
 
             # only pay attention to labels and variables
-            if tmp[0] == '.var':
-                assert(len(tmp) == 2)
-                assert(tmp[0] not in self.vars)
+            tmp = cline.split("#")
+            """
+            if tmp[0] == ".var":
+                assert len(tmp) == 2, f"no name or error name format for variable "
+                assert tmp[1] in self.vars, f"Variable {tmp[1]} already declared"
                 self.vars[tmp[1]] = data
                 data += 4
-                zassert(data < bpc, 'Load address overrun by static data')
-                if self.verbose: print('ASSIGN VAR', tmp[0], "-->", tmp[1], self.vars[tmp[1]])
-            elif tmp[0][0] == '.':
-                assert(len(tmp) == 1)
+                zassert(data < bpc, "Load address overrun by static data")
+                if self.verbose:
+                    print("ASSIGN VAR", tmp[0], "-->", tmp[1], self.vars[tmp[1]])
+            elif tmp[0][0] == ".":
+                assert len(tmp) == 1
                 self.labels[tmp[0]] = int(pc)
-                if self.verbose: print('ASSIGN LABEL', tmp[0], "-->", pc)
+                if self.verbose:
+                    print("ASSIGN LABEL", tmp[0], "-->", pc)
+            else:
+                pc += 1
+            """
+            if tmp[0].startswith("."):
+                self.labels[tmp[0]] = int(pc)
+                if self.verbose:
+                    print("ASSIGN LABEL", tmp[0], "-->", pc)
             else:
                 pc += 1
         fd.close()
 
-        if self.verbose: print('')
+        if self.verbose:
+            print("")
 
         # second pass: do everything else
         pc = int(loadaddr)
         fd = open(infile)
         for line in fd:
             cline = line.rstrip()
-            # print 'PASS 2', cline
-
-            # remove everything after the comment marker
-            ctmp = cline.split('#')
-            assert(len(ctmp) == 1 or len(ctmp) == 2)
-            if len(ctmp) == 2:
-                cline = ctmp[0]
-
-            # remove empty lines, and split line by spaces
-            tmp = cline.split()
-            if len(tmp) == 0:
+            if cline.startswith(("#", "//")) or not cline:
                 continue
 
             # skip labels: all else must be instructions
-            if cline[0] != '.':
-                tmp              = cline.split(None, 1)
-                opcode           = tmp[0]
+            # stripped = cline.strip()
+            if not cline.startswith("."):
+                tmp = cline.split(None, 1)
+                opcode = tmp[0]
                 self.pmemory[pc] = cline.strip()
 
                 # MAIN OPCODE LOOP
-                if opcode == 'mov':
-                    rtmp = tmp[1].split(',', 1)
-                    zassert(len(tmp) == 2 and len(rtmp) == 2, 'mov: needs two args, separated by commas [%s]' % cline)
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    (src, stype) = self.getarg(arg1)
-                    (dst, dtype) = self.getarg(arg2)
-                    # print 'MOV', src, stype, dst, dtype
-                    if stype == 'TYPE_MEMORY' and dtype == 'TYPE_MEMORY':
-                        print('bad mov: two memory arguments')
-                        exit(1)
-                    elif stype == 'TYPE_IMMEDIATE' and dtype == 'TYPE_IMMEDIATE':
-                        print('bad mov: two immediate arguments')
-                        exit(1)
-                    elif stype == 'TYPE_IMMEDIATE' and dtype == 'TYPE_REGISTER':
-                        self.memory[pc]  = 'self.move_i_to_r(%d, %d)' % (int(src), dst)
-                    elif stype == 'TYPE_IMMEDIATE' and dtype == 'TYPE_REGISTER':
-                        self.memory[pc]  = 'self.move_i_to_r(%d, %d)' % (int(src), dst)
-                    elif stype == 'TYPE_MEMORY'    and dtype == 'TYPE_REGISTER':
-                        tmp = src.split(',')
-                        assert(len(tmp) == 3)
-                        self.memory[pc] = 'self.move_m_to_r(%d, %d, %d, %d)' % (int(tmp[0]), int(tmp[1]), int(tmp[2]), dst)
-                    elif stype == 'TYPE_REGISTER'  and dtype == 'TYPE_MEMORY':
-                        tmp = dst.split(',')
-                        assert(len(tmp) == 3)
-                        self.memory[pc] = 'self.move_r_to_m(%d, %d, %d, %d)' % (src, int(tmp[0]), int(tmp[1]), int(tmp[2]))
-                    elif stype == 'TYPE_REGISTER'  and dtype == 'TYPE_REGISTER':
-                        self.memory[pc] = 'self.move_r_to_r(%d, %d)' % (src, dst)
-                    elif stype == 'TYPE_IMMEDIATE'  and dtype == 'TYPE_MEMORY':
-                        tmp = dst.split(',')
-                        assert(len(tmp) == 3)
-                        self.memory[pc] = 'self.move_i_to_m(%d, %d, %d, %d)' % (src, int(tmp[0]), int(tmp[1]), int(tmp[2]))
-                    else:
-                        zassert(False, 'malformed mov instruction')
-                elif opcode == 'pop':
-                    if len(tmp) == 1:
-                        self.memory[pc] = 'self.pop()'
-                    elif len(tmp) == 2:
-                        arg = tmp[1].strip()
-                        (dst, dtype) = self.getarg(arg)
-                        zassert(dtype == 'TYPE_REGISTER', 'Can only pop into a register')
-                        self.memory[pc] = 'self.pop_r(%d)' % dst
-                    else:
-                        zassert(False, 'pop instruction must take zero/one args')
-                elif opcode == 'push':
-                    (src, stype) = self.getarg(tmp[1].strip())
-                    if stype == 'TYPE_REGISTER':
-                        self.memory[pc] = 'self.push_r(%d)' % (int(src))
-                    elif stype == 'TYPE_MEMORY':
-                        tmp = src.split(',')
-                        assert(len(tmp) == 3)
-                        self.memory[pc] = 'self.push_m(%d,%d,%d)' % (int(tmp[0]), int(tmp[1]), int(tmp[2]))
-                    else:
-                        zassert(False, 'Cannot push anything but registers')
-                elif opcode == 'call':
-                    (targ, ttype) = self.getarg(tmp[1].strip())
-                    if ttype == 'TYPE_LABEL':
-                        self.memory[pc] = 'self.call(%d)' % (int(self.labels[targ]))
-                    else:
-                        zassert(False, 'Cannot call anything but a label')
-                elif opcode == 'ret':
-                    assert(len(tmp) == 1)
-                    self.memory[pc] = 'self.ret()'
-                elif opcode == 'add':
-                    rtmp = tmp[1].split(',', 1)
-                    zassert(len(tmp) == 2 and len(rtmp) == 2, 'add: needs two args, separated by commas [%s]' % cline)
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    (src, stype) = self.getarg(arg1)
-                    (dst, dtype) = self.getarg(arg2)
-                    if stype == 'TYPE_IMMEDIATE' and dtype == 'TYPE_REGISTER':
-                        self.memory[pc] = 'self.add_i_to_r(%d, %d)' % (int(src), dst)
-                    elif stype == 'TYPE_REGISTER' and dtype == 'TYPE_REGISTER':
-                        self.memory[pc] = 'self.add_r_to_r(%d, %d)' % (int(src), dst)
-                    else:
-                        zassert(False, 'malformed usage of add instruction')
-                elif opcode == 'sub':
-                    rtmp = tmp[1].split(',', 1)
-                    zassert(len(tmp) == 2 and len(rtmp) == 2, 'sub: needs two args, separated by commas [%s]' % cline)
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    (src, stype) = self.getarg(arg1)
-                    (dst, dtype) = self.getarg(arg2)
-                    if stype == 'TYPE_IMMEDIATE' and dtype == 'TYPE_REGISTER':
-                        self.memory[pc] = 'self.sub_i_to_r(%d, %d)' % (int(src), dst)
-                    elif stype == 'TYPE_REGISTER' and dtype == 'TYPE_REGISTER':
-                        self.memory[pc] = 'self.sub_r_to_r(%d, %d)' % (int(src), dst)
-                    else:
-                        zassert(False, 'malformed usage of sub instruction')
-                elif opcode == 'fetchadd':
-                    rtmp = tmp[1].split(',', 1)
-                    zassert(len(tmp) == 2 and len(rtmp) == 2, 'fetchadd: needs two args, separated by commas [%s]' % cline)
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    (src, stype) = self.getarg(arg1)
-                    (dst, dtype) = self.getarg(arg2)
-                    tmp = dst.split(',')
-                    assert(len(tmp) == 3)
-                    if stype == 'TYPE_REGISTER' and dtype == 'TYPE_MEMORY':
-                        self.memory[pc] = 'self.fetchadd(%d, %d, %d, %d)' % (src, int(tmp[0]), int(tmp[1]), int(tmp[2]))
-                    else:
-                        zassert(False, 'poorly specified fetch and add')
-                elif opcode == 'xchg':
-                    rtmp = tmp[1].split(',', 1)
-                    zassert(len(tmp) == 2 and len(rtmp) == 2, 'xchg: needs two args, separated by commas [%s]' % cline)
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    (src, stype) = self.getarg(arg1)
-                    (dst, dtype) = self.getarg(arg2)
-                    tmp = dst.split(',')
-                    assert(len(tmp) == 3)
-                    if stype == 'TYPE_REGISTER' and dtype == 'TYPE_MEMORY':
-                        self.memory[pc] = 'self.atomic_exchange(%d, %d, %d, %d)' % (src, int(tmp[0]), int(tmp[1]), int(tmp[2]))
-                    else:
-                        zassert(False, 'poorly specified atomic exchange')
-                elif opcode == 'test':
-                    rtmp = tmp[1].split(',', 1)
-                    zassert(len(tmp) == 2 and len(rtmp) == 2, 'test: needs two args, separated by commas [%s]' % cline)
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    (src, stype) = self.getarg(arg1)
-                    (dst, dtype) = self.getarg(arg2)
-                    if stype == 'TYPE_IMMEDIATE' and dtype == 'TYPE_REGISTER':
-                        self.memory[pc] = 'self.test_i_r(%d, %d)' % (int(src), dst)
-                    elif stype == 'TYPE_REGISTER' and dtype == 'TYPE_REGISTER':
-                        self.memory[pc] = 'self.test_r_r(%d, %d)' % (int(src), dst)
-                    elif stype == 'TYPE_REGISTER' and dtype == 'TYPE_IMMEDIATE':
-                        self.memory[pc] = 'self.test_r_i(%d, %d)' % (int(src), dst)
-                    else:
-                        zassert(False, 'malformed usage of test instruction')
-                elif opcode == 'j':
-                    (targ, ttype) = self.getarg(tmp[1].strip())
-                    zassert(ttype == 'TYPE_LABEL', 'bad jump target [%s]' % tmp[1].strip())
-                    self.memory[pc] = 'self.jump(%d)' % int(self.labels[targ])
-                elif opcode == 'jne':
-                    (targ, ttype) = self.getarg(tmp[1].strip())
-                    zassert(ttype == 'TYPE_LABEL', 'bad jump target [%s]' % tmp[1].strip())
-                    self.memory[pc] = 'self.jump_notequal(%d)' % int(self.labels[targ])
-                elif opcode == 'je':
-                    (targ, ttype) = self.getarg(tmp[1].strip())
-                    zassert(ttype == 'TYPE_LABEL', 'bad jump target [%s]' % tmp[1].strip())
-                    self.memory[pc] = 'self.jump_equal(%d)' % self.labels[targ]
-                elif opcode == 'jlt':
-                    (targ, ttype) = self.getarg(tmp[1].strip())
-                    zassert(ttype == 'TYPE_LABEL', 'bad jump target [%s]' % tmp[1].strip())
-                    self.memory[pc] = 'self.jump_lessthan(%d)' % int(self.labels[targ])
-                elif opcode == 'jlte':
-                    (targ, ttype) = self.getarg(tmp[1].strip())
-                    zassert(ttype == 'TYPE_LABEL', 'bad jump target [%s]' % tmp[1].strip())
-                    self.memory[pc] = 'self.jump_lessthanorequal(%s)' % self.labels[targ]
-                elif opcode == 'jgt':
-                    (targ, ttype) = self.getarg(tmp[1].strip())
-                    zassert(ttype == 'TYPE_LABEL', 'bad jump target [%s]' % tmp[1].strip())
-                    self.memory[pc] = 'self.jump_greaterthan(%d)' % int(self.labels[targ])
-                elif opcode == 'jgte':
-                    (targ, ttype) = self.getarg(tmp[1].strip())
-                    zassert(ttype == 'TYPE_LABEL', 'bad jump target [%s]' % tmp[1].strip())
-                    self.memory[pc] = 'self.jump_greaterthanorequal(%s)' % self.labels[targ]
-                elif opcode == 'nop':
-                    self.memory[pc] = 'self.nop()'
-                elif opcode == 'halt':
-                    self.memory[pc] = 'self.halt()'
-                elif opcode == 'yield':
-                    self.memory[pc] = 'self.iyield()'
-                elif opcode == 'rdump':
-                    self.memory[pc] = 'self.rdump()'
-                elif opcode == 'mdump':
-                    self.memory[pc] = 'self.mdump(%s)' % tmp[1]
-                else:
-                    print('illegal opcode: ', opcode)
-                    exit(1)
+                if opcode == "mov":
+                    rtmp = tmp[1].split(",", 1)
+                    assert (
+                        len(rtmp) == 2
+                    ), f"mov: needs two args, separated by commas {cline}"
 
-                if self.verbose: print('pc:%d LOADING %20s --> %s' % (pc, self.pmemory[pc], self.memory[pc]))
-                
+                    arg1 = rtmp[0].strip()
+                    arg2 = rtmp[1].strip()
+                    src, stype = self.getarg(arg1)
+                    dst, dtype = self.getarg(arg2)
+                    if stype == "TYPE_MEMORY" and dtype == "TYPE_MEMORY":
+                        print("bad mov: two memory arguments")
+                        exit(1)
+                    elif stype == "TYPE_IMMEDIATE" and dtype == "TYPE_IMMEDIATE":
+                        print("bad mov: two immediate arguments")
+                        exit(1)
+                    elif stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
+                        self.memory[pc] = (self.move_i_to_r, (int(src), dst))
+                    elif stype == "TYPE_MEMORY" and dtype == "TYPE_REGISTER":
+                        # src is already a tuple (value, reg1, reg2)
+                        self.memory[pc] = (
+                            self.move_m_to_r,
+                            (
+                                src[0],
+                                src[1],
+                                src[2],
+                                dst,
+                            ),
+                        )
+                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_MEMORY":
+                        # dst is already a tuple (value, reg1, reg2)
+                        self.memory[pc] = (
+                            self.move_r_to_m,
+                            (
+                                src,
+                                dst[0],
+                                dst[1],
+                                dst[2],
+                            ),
+                        )
+                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
+                        self.memory[pc] = (self.move_r_to_r, (src, dst))
+                    elif stype == "TYPE_IMMEDIATE" and dtype == "TYPE_MEMORY":
+                        # dst is already a tuple (value, reg1, reg2)
+                        self.memory[pc] = (
+                            self.move_i_to_m,
+                            (
+                                src,
+                                dst[0],
+                                dst[1],
+                                dst[2],
+                            ),
+                        )
+                    else:
+                        zassert(False, "malformed mov instruction")
+                elif opcode == "pop":
+                    if len(tmp) == 1:
+                        self.memory[pc] = (self.pop, ())
+                    elif len(tmp) == 2:
+                        dst, dtype = self.getarg(tmp[1].strip())
+                        zassert(
+                            dtype == "TYPE_REGISTER", "Can only pop into a register"
+                        )
+                        self.memory[pc] = (self.pop_r, (dst,))
+                    else:
+                        zassert(False, "pop instruction must take zero/one args")
+                elif opcode == "push":
+                    src, stype = self.getarg(tmp[1].strip())
+                    if stype == "TYPE_REGISTER":
+                        self.memory[pc] = (self.push_r, (int(src),))
+                    elif stype == "TYPE_MEMORY":
+                        self.memory[pc] = (
+                            self.push_m,
+                            (src[0], src[1], src[2]),
+                        )
+                    else:
+                        zassert(False, "Cannot push anything but registers")
+                elif opcode == "call":
+                    targ, ttype = self.getarg(tmp[1].strip())
+                    if ttype == "TYPE_LABEL":
+                        self.memory[pc] = (self.call, (int(self.labels[targ]),))
+                    else:
+                        zassert(False, "Cannot call anything but a label")
+                elif opcode == "ret":
+                    assert len(tmp) == 1
+                    self.memory[pc] = (self.ret, ())
+                elif opcode == "add":
+                    rtmp = tmp[1].split(",", 1)
+                    zassert(
+                        len(tmp) == 2 and len(rtmp) == 2,
+                        "add: needs two args, separated by commas [%s]" % cline,
+                    )
+                    arg1 = rtmp[0].strip()
+                    arg2 = rtmp[1].strip()
+                    src, stype = self.getarg(arg1)
+                    dst, dtype = self.getarg(arg2)
+                    if stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
+                        self.memory[pc] = (self.add_i_r, (int(src), dst))
+                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
+                        self.memory[pc] = (self.add_r_r, (int(src), dst))
+                    else:
+                        zassert(False, "malformed usage of add instruction")
+                elif opcode == "sub":
+                    rtmp = tmp[1].split(",", 1)
+                    zassert(
+                        len(tmp) == 2 and len(rtmp) == 2,
+                        "sub: needs two args, separated by commas [%s]" % cline,
+                    )
+                    arg1 = rtmp[0].strip()
+                    arg2 = rtmp[1].strip()
+                    src, stype = self.getarg(arg1)
+                    dst, dtype = self.getarg(arg2)
+                    if stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
+                        self.memory[pc] = (self.sub_i_r, (int(src), dst))
+                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
+                        self.memory[pc] = (self.sub_r_r, (int(src), dst))
+                    else:
+                        zassert(False, "malformed usage of sub instruction")
+                elif opcode == "fetchadd":
+                    rtmp = tmp[1].split(",", 1)
+                    zassert(
+                        len(tmp) == 2 and len(rtmp) == 2,
+                        "fetchadd: needs two args, separated by commas [%s]" % cline,
+                    )
+                    arg1 = rtmp[0].strip()
+                    arg2 = rtmp[1].strip()
+                    src, stype = self.getarg(arg1)
+                    dst, dtype = self.getarg(arg2)
+                    if stype == "TYPE_REGISTER" and dtype == "TYPE_MEMORY":
+                        self.memory[pc] = (
+                            self.fetchadd,
+                            (
+                                src,
+                                dst[0],
+                                dst[1],
+                                dst[2],
+                            ),
+                        )
+                    else:
+                        zassert(False, "poorly specified fetch and add")
+                elif opcode == "xchg":
+                    rtmp = tmp[1].split(",", 1)
+                    zassert(
+                        len(tmp) == 2 and len(rtmp) == 2,
+                        "xchg: needs two args, separated by commas [%s]" % cline,
+                    )
+                    arg1 = rtmp[0].strip()
+                    arg2 = rtmp[1].strip()
+                    src, stype = self.getarg(arg1)
+                    dst, dtype = self.getarg(arg2)
+                    if stype == "TYPE_REGISTER" and dtype == "TYPE_MEMORY":
+                        self.memory[pc] = (
+                            self.atomic_exchange,
+                            (
+                                src,
+                                dst[0],
+                                dst[1],
+                                dst[2],
+                            ),
+                        )
+                    else:
+                        zassert(False, "poorly specified atomic exchange")
+                elif opcode == "test":
+                    rtmp = tmp[1].split(",", 1)
+                    zassert(
+                        len(tmp) == 2 and len(rtmp) == 2,
+                        "test: needs two args, separated by commas [%s]" % cline,
+                    )
+                    arg1 = rtmp[0].strip()
+                    arg2 = rtmp[1].strip()
+                    src, stype = self.getarg(arg1)
+                    dst, dtype = self.getarg(arg2)
+                    if stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
+                        self.memory[pc] = (self.test_i_r, (int(src), dst))
+                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
+                        self.memory[pc] = (self.test_r_r, (int(src), dst))
+                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_IMMEDIATE":
+                        self.memory[pc] = (self.test_r_i, (int(src), dst))
+                    else:
+                        zassert(False, "malformed usage of test instruction")
+                elif opcode == "j":
+                    targ, ttype = self.getarg(tmp[1].strip())
+                    zassert(
+                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
+                    )
+                    self.memory[pc] = (self.jump, (int(self.labels[targ]),))
+                elif opcode == "jne":
+                    targ, ttype = self.getarg(tmp[1].strip())
+                    zassert(
+                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
+                    )
+                    self.memory[pc] = (self.jump_notequal, (int(self.labels[targ]),))
+                elif opcode == "je":
+                    targ, ttype = self.getarg(tmp[1].strip())
+                    zassert(
+                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
+                    )
+                    self.memory[pc] = (self.jump_equal, (int(self.labels[targ]),))
+                elif opcode == "jlt":
+                    targ, ttype = self.getarg(tmp[1].strip())
+                    zassert(
+                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
+                    )
+                    self.memory[pc] = (self.jump_lessthan, (int(self.labels[targ]),))
+                elif opcode == "jlte":
+                    targ, ttype = self.getarg(tmp[1].strip())
+                    zassert(
+                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
+                    )
+                    self.memory[pc] = (
+                        self.jump_lessthanorequal,
+                        (int(self.labels[targ]),),
+                    )
+                elif opcode == "jgt":
+                    targ, ttype = self.getarg(tmp[1].strip())
+                    zassert(
+                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
+                    )
+                    self.memory[pc] = (self.jump_greaterthan, (int(self.labels[targ]),))
+                elif opcode == "jgte":
+                    targ, ttype = self.getarg(tmp[1].strip())
+                    zassert(
+                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
+                    )
+                    self.memory[pc] = (
+                        self.jump_greaterthanorequal,
+                        (int(self.labels[targ]),),
+                    )
+                elif opcode == "nop":
+                    self.memory[pc] = (self.nop, ())
+                elif opcode == "halt":
+                    self.memory[pc] = (self.halt, ())
+                elif opcode == "yield":
+                    self.memory[pc] = (self.iyield, ())
+                elif opcode == "rdump":
+                    self.memory[pc] = (self.rdump, ())
+                elif opcode == "mdump":
+                    self.memory[pc] = (self.mdump, (int(tmp[1]),))
+                else:
+                    print("illegal opcode: ", opcode)
+                    exit(1)
+                if self.verbose:
+                    print(
+                        f"pc:{pc} LOADING {self.pmemory[pc]:>20s} --> {self.memory[pc]}"
+                    )
                 # INCREMENT PC for loader
                 pc += 1
         # END: loop over file
         fd.close()
-        if self.verbose: print('')
+        if self.verbose:
+            print("")
+
+        self._resolve_traces()
         return
-    # END: load
 
     def print_headers(self, procs):
-        # print some headers
-        if len(self.memtrace) > 0:
-            for m in self.memtrace:
-                if m[0].isdigit():
-                    print('%5d' % int(m), end=' ')
-                else:
-                    zassert(m in self.vars, 'Traced variable %s not declared' % m)
-                    print('%5s' % m, end=' ')
-            print(' ', end=' ')
-        if len(self.regtrace) > 0:
-            for r in self.regtrace:
-                print('%5s' % self.get_regname(r), end=' ')
-            print(' ', end=' ')
-        if cctrace == True:
-            print('>= >  <= <  != ==', end=' ')
+        header_parts = []
+        if self.resolved_memtrace:
+            for label, _ in self.resolved_memtrace:
+                header_parts.append(f"{label:>5}")
+            header_parts.append(" ")
+        if self.resolved_regtrace:
+            for ridx in self.resolved_regtrace:
+                header_parts.append(f"{self.rev_regnames[ridx]:>5}")
+            header_parts.append(" ")
+        if self.cctrace:
+            header_parts.append(">= >  <= <  != ==")
 
-        # and per thread
         for i in range(procs.getnum()):
-            print('       Thread %d        ' % i, end=' ')
-        print('')
-        return
+            header_parts.append(f"       Thread {i}        ")
+        print("".join(header_parts))
 
-    def print_trace(self, newline):
-        if len(self.memtrace) > 0:
-            for m in self.memtrace:
+    def get_trace(self):
+        """Constructs the trace string for the current CPU state."""
+        if not (self.resolved_memtrace or self.resolved_regtrace or self.cctrace):
+            return ""
+
+        parts = []
+        if self.resolved_memtrace:
+            for _, addr in self.resolved_memtrace:
                 if self.compute:
-                    if m[0].isdigit():
-                        print('%5d' % self.memory[int(m)], end=' ')
-                    else:
-                        zassert(m in self.vars, 'Traced variable %s not declared' % m)
-                        print('%5d' % self.memory[self.vars[m]], end=' ')
+                    parts.append(f"{self.memory[addr]:>5}")
                 else:
-                    print('%5s' % '?', end=' ')
-            print(' ', end=' ')
-        if len(self.regtrace) > 0:
-            for r in self.regtrace:
+                    parts.append(f"{'?':>5}")
+            parts.append(" ")
+
+        if self.resolved_regtrace:
+            for ridx in self.resolved_regtrace:
                 if self.compute:
-                    print('%5d' % self.registers[r], end=' ')
+                    parts.append(f"{self.registers[ridx]:>5}")
                 else:
-                    print('%5s' % '?', end=' ')
-            print(' ', end=' ')
-        if cctrace == True:
+                    parts.append(f"{'?':>5}")
+            parts.append(" ")
+
+        if self.cctrace:
             for c in self.condlist:
                 if self.compute:
-                    if self.conditions[c]:
-                        print('1 ', end=' ')
-                    else:
-                        print('0 ', end=' ')
+                    parts.append("1 " if self.conditions[c] else "0 ")
                 else:
-                    print('? ', end=' ')
-        if (len(self.memtrace) > 0 or len(self.regtrace) > 0 or cctrace == True) and newline == True:
-            print('')
-        return
+                    parts.append("? ")
+        return "".join(parts)
 
     def setint(self, intfreq, intrand):
-        if intrand == False:
-            return intfreq
-        return int(random.random() * intfreq) + 1
+        return intfreq if not intrand else int(random.random() * intfreq) + 1
+
+    _COLUMN_WIDTH = 25
 
     def run(self, procs, intfreq, intrand):
-        # hw init: cc's, interrupt frequency, etc.
+        """
+        Main execution loop. Optimized by localizing method lookups.
+        """
         interrupt = self.setint(intfreq, intrand)
-        icount    = 0
+        icount = 0
+
+        # Optimization: Localize lookups for speed in Python hot loops
+        get_trace = self.get_trace
+        procs_getcurr = procs.getcurr
+        procs_next = procs.next
+        procs_save = procs.save
+        procs_restore = procs.restore
+
+        # Localize frequently used attributes for faster access
+        memory = self.memory
+        pmemory = self.pmemory
+        col_width = self._COLUMN_WIDTH
 
         self.print_headers(procs)
-        self.print_trace(True)
-        
+        print(get_trace())
+
         while True:
-            # need thread ID of current process
-            tid = procs.getcurr().gettid()
+            curr_proc = procs_getcurr()
+            tid = curr_proc.gettid()
 
             # FETCH
-            prevPC       = self.PC
-            instruction  = self.memory[self.PC]
-            self.PC     += 1
+            prevPC = self.PC
+            func, args = memory[prevPC]
+            self.PC += 1
 
-            # DECODE and EXECUTE
-            # key: self.PC may be changed during eval; thus MUST be incremented BEFORE eval
-            rc = eval(instruction)
+            # EXECUTE (pre-decoded func)
+            rc = func(*args)
 
-            # tracing details: ALWAYS AFTER EXECUTION OF INSTRUCTION
-            self.print_trace(False)
-
-            # output: thread-proportional spacing followed by PC and instruction
-            dospace(tid)
-            print(prevPC, self.pmemory[prevPC])
+            # Trace and instruction output
+            print(f"{get_trace()}{' ' * (tid * col_width)}{prevPC} {pmemory[prevPC]}")
             icount += 1
 
-            # halt instruction issued
             if rc == -1:
                 procs.done()
                 if procs.numdone() == procs.getnum():
                     return icount
-                procs.next()
-                procs.restore()
+                procs_next()
+                procs_restore()
 
-                self.print_trace(False)
-                for i in range(procs.getnum()):
-                    print('----- Halt;Switch ----- ', end=' ')
-                print('')
+                msg = "".join(["----- Halt;Switch ----- "] * procs.getnum())
+                print(f"{get_trace()}{msg}")
+                interrupt = self.setint(intfreq, intrand)
+                continue
 
-            # do interrupt processing
             interrupt -= 1
             if interrupt == 0 or rc == -2:
                 interrupt = self.setint(intfreq, intrand)
-                procs.save()
-                procs.next()
-                procs.restore()
+                procs_save()
+                procs_next()
+                procs_restore()
 
-                self.print_trace(False)
-                for i in range(procs.getnum()):
-                    print('------ Interrupt ------ ', end=' ')
-                print('')
-        # END: while
-        return
-
-# 
-# END: class cpu
-# 
+                msg = "".join(["------ Interrupt ------ "] * procs.getnum())
+                print(f"{get_trace()}{msg}")
 
 
 #
@@ -799,8 +869,8 @@ class cpu:
 #
 class proclist:
     def __init__(self):
-        self.plist  = []
-        self.curr   = 0
+        self.plist = []
+        self.curr = 0
         self.active = 0
 
     def done(self):
@@ -827,44 +897,45 @@ class proclist:
         self.plist[self.curr].restore()
 
     def next(self):
-        for i in range(self.curr+1, len(self.plist)):
+        for i in range(self.curr + 1, len(self.plist)):
             if self.plist[i].isdone() == False:
                 self.curr = i
                 return
-        for i in range(0, self.curr+1):
+        for i in range(0, self.curr + 1):
             if self.plist[i].isdone() == False:
                 self.curr = i
                 return
-            
+
+
 #
 # PROCESS class
 #
 class process:
     def __init__(self, cpu, tid, pc, stackbottom, reginit):
-        self.cpu   = cpu  # object reference
-        self.tid   = tid
-        self.pc    = pc
-        self.regs  = {}
-        self.cc    = {}
-        self.done  = False
+        self.cpu = cpu  # object reference
+        self.tid = tid
+        self.pc = pc
+        self.regs = {}
+        self.cc = {}
+        self.done = False
         self.stack = stackbottom
 
         # init regs: all 0 or specially set to something
-        for r in self.cpu.get_regnums():
+        for r in self.cpu.regnums:
             self.regs[r] = 0
-        if reginit != '':
+        if reginit != "":
             # form: ax=1,bx=2 (for some subset of registers)
-            for r in reginit.split(':'):
-                tmp = r.split('=')
-                assert(len(tmp) == 2)
+            for r in reginit.split(":"):
+                tmp = r.split("=")
+                assert len(tmp) == 2
                 self.regs[self.cpu.get_regnum(tmp[0])] = int(tmp[1])
 
         # init CCs
-        for c in self.cpu.get_condlist():
+        for c in self.cpu.condlist:
             self.cc[c] = False
 
         # stack
-        self.regs[self.cpu.get_regnum('sp')] = stackbottom
+        self.regs[self.cpu.get_regnum("sp")] = stackbottom
         # print 'REG', self.cpu.get_regnum('sp'), self.regs[self.cpu.get_regnum('sp')]
 
         return
@@ -874,16 +945,16 @@ class process:
 
     def save(self):
         self.pc = self.cpu.get_pc()
-        for c in self.cpu.get_condlist():
+        for c in self.cpu.condlist:
             self.cc[c] = self.cpu.get_cond(c)
-        for r in self.cpu.get_regnums():
+        for r in self.cpu.regnums:
             self.regs[r] = self.cpu.get_reg(r)
 
     def restore(self):
         self.cpu.set_pc(self.pc)
-        for c in self.cpu.get_condlist():
+        for c in self.cpu.condlist:
             self.cpu.set_cond(c, self.cc[c])
-        for r in self.cpu.get_regnums():
+        for r in self.cpu.regnums:
             self.cpu.set_reg(r, self.regs[r])
 
     def setdone(self):
@@ -892,88 +963,146 @@ class process:
     def isdone(self):
         return self.done == True
 
+
 #
 # main program
 #
-parser = OptionParser()
-parser.add_option('-s', '--seed',      default=0,          help='the random seed',                  action='store',      type='int',    dest='seed')
-parser.add_option('-t', '--threads',   default=2,          help='number of threads',                action='store',      type='int',    dest='numthreads')
-parser.add_option('-p', '--program',   default='',         help='source program (in .s)',           action='store',      type='string', dest='progfile')
-parser.add_option('-i', '--interrupt', default=50,         help='interrupt frequency',              action='store',      type='int',    dest='intfreq')
-parser.add_option('-r', '--randints',  default=False,      help='if interrupts are random',         action='store_true',                dest='intrand')
-parser.add_option('-a', '--argv',      default='',
-                  help='comma-separated per-thread args (e.g., ax=1,ax=2 sets thread 0 ax reg to 1 and thread 1 ax reg to 2); specify multiple regs per thread via colon-separated list (e.g., ax=1:bx=2,cx=3 sets thread 0 ax and bx and just cx for thread 1)',
-                  action='store',      type='string', dest='argv')
-parser.add_option('-L', '--loadaddr',  default=1000,       help='address where to load code',       action='store',      type='int',    dest='loadaddr')
-parser.add_option('-m', '--memsize',   default=128,        help='size of address space (KB)',       action='store',      type='int',    dest='memsize')
-parser.add_option('-M', '--memtrace',  default='',         help='comma-separated list of addrs to trace (e.g., 20000,20001)', action='store',
-                  type='string', dest='memtrace')
-parser.add_option('-R', '--regtrace',  default='',         help='comma-separated list of regs to trace (e.g., ax,bx,cx,dx)',  action='store',
-                  type='string', dest='regtrace')
-parser.add_option('-C', '--cctrace',   default=False,      help='should we trace condition codes',  action='store_true', dest='cctrace')
-parser.add_option('-S', '--printstats',default=False,      help='print some extra stats',           action='store_true', dest='printstats')
-parser.add_option('-v', '--verbose',   default=False,      help='print some extra info',            action='store_true', dest='verbose')
-parser.add_option('-c', '--compute',   default=False,      help='compute answers for me',           action='store_true', dest='solve')
-(options, args) = parser.parse_args()
+parser = argparse.ArgumentParser(description="x86 CPU Simulator")
+parser.add_argument("-s", "--seed", default=0, help="the random seed", type=int)
+parser.add_argument(
+    "-t", "--threads", default=2, help="number of threads", type=int, dest="numthreads"
+)
+parser.add_argument(
+    "-p", "--program", default="", help="source program (in .s)", dest="progfile"
+)
+parser.add_argument(
+    "-i",
+    "--interrupt",
+    default=50,
+    help="interrupt frequency",
+    type=int,
+    dest="intfreq",
+)
+parser.add_argument(
+    "-r",
+    "--randints",
+    default=False,
+    help="if interrupts are random",
+    action="store_true",
+    dest="intrand",
+)
+parser.add_argument(
+    "-a",
+    "--argv",
+    default="",
+    help="comma-separated per-thread args (e.g., ax=1,ax=2 sets thread 0 ax reg to 1 and thread 1 ax reg to 2); specify multiple regs per thread via colon-separated list (e.g., ax=1:bx=2,cx=3 sets thread 0 ax and bx and just cx for thread 1)",
+)
+parser.add_argument(
+    "-L", "--loadaddr", default=1000, help="address where to load code", type=int
+)
+parser.add_argument(
+    "-m", "--memsize", default=128, help="size of address space (KB)", type=int
+)
+parser.add_argument(
+    "-M",
+    "--memtrace",
+    default="",
+    help="comma-separated list of addrs to trace (e.g., 20000,20001)",
+)
+parser.add_argument(
+    "-R",
+    "--regtrace",
+    default="",
+    help="comma-separated list of regs to trace (e.g., ax,bx,cx,dx)",
+)
+parser.add_argument(
+    "-C",
+    "--cctrace",
+    default=False,
+    help="should we trace condition codes",
+    action="store_true",
+)
+parser.add_argument(
+    "-S",
+    "--printstats",
+    default=False,
+    help="print some extra stats",
+    action="store_true",
+)
+parser.add_argument(
+    "-v", "--verbose", default=False, help="print some extra info", action="store_true"
+)
+parser.add_argument(
+    "-c",
+    "--compute",
+    default=False,
+    help="compute answers for me",
+    action="store_true",
+    dest="solve",
+)
 
-print('ARG seed',                options.seed)
-print('ARG numthreads',          options.numthreads)
-print('ARG program',             options.progfile)
-print('ARG interrupt frequency', options.intfreq)
-print('ARG interrupt randomness',options.intrand)
-print('ARG argv',                options.argv)
-print('ARG load address',        options.loadaddr)
-print('ARG memsize',             options.memsize)
-print('ARG memtrace',            options.memtrace)
-print('ARG regtrace',            options.regtrace)
-print('ARG cctrace',             options.cctrace)
-print('ARG printstats',          options.printstats)
-print('ARG verbose',             options.verbose)
-print('')
+args = parser.parse_args()
 
-seed       = int(options.seed)
-numthreads = int(options.numthreads)
-intfreq    = int(options.intfreq)
-zassert(intfreq > 0, 'Interrupt frequency must be greater than 0')
-intrand    = int(options.intrand)
-progfile   = options.progfile
-zassert(progfile != '', 'Program file must be specified')
-argv       = options.argv.split(',')
-zassert(len(argv) == numthreads or len(argv) == 1, 'argv: must be one per-thread or just one set of values for all threads') 
+print(f"ARG seed {args.seed}")
+print(f"ARG numthreads {args.numthreads}")
+print(f"ARG program {args.progfile}")
+print(f"ARG interrupt frequency {args.intfreq}")
+print(f"ARG interrupt randomness {args.intrand}")
+print(f"ARG argv {args.argv}")
+print(f"ARG load address {args.loadaddr}")
+print(f"ARG memsize {args.memsize}")
+print(f"ARG memtrace {args.memtrace}")
+print(f"ARG regtrace {args.regtrace}")
+print(f"ARG cctrace {args.cctrace}")
+print(f"ARG printstats {args.printstats}")
+print(f"ARG verbose {args.verbose}")
+print("")
 
-loadaddr   = options.loadaddr
-memsize    = options.memsize
-random_seed(seed)
+seed = args.seed
+numthreads = args.numthreads
+intfreq = args.intfreq
+zassert(intfreq > 0, "Interrupt frequency must be greater than 0")
+intrand = args.intrand
+progfile = args.progfile
+zassert(progfile != "", "Program file must be specified")
+argv = args.argv.split(",")
+zassert(
+    len(argv) == numthreads or len(argv) == 1,
+    "argv: must be one per-thread or just one set of values for all threads",
+)
 
-memtrace   = []
-if options.memtrace != '':
-    for m in options.memtrace.split(','):
+loadaddr = args.loadaddr
+memsize = args.memsize
+random.seed(seed)
+
+memtrace = []
+if args.memtrace != "":
+    for m in args.memtrace.split(","):
         memtrace.append(m)
 
-regtrace   = []
-if options.regtrace != '':
-    for r in options.regtrace.split(','):
+regtrace = []
+if args.regtrace != "":
+    for r in args.regtrace.split(","):
         regtrace.append(r)
 
-cctrace    = options.cctrace
+cctrace = args.cctrace
 
-printstats = options.printstats
-verbose    = options.verbose
-        
+printstats = args.printstats
+verbose = args.verbose
+
 #
 # MAIN program
 #
 debug = False
-debug = False
 
-cpu = cpu(memsize, memtrace, regtrace, cctrace, options.solve, verbose)
+cpu = cpu(memsize, memtrace, regtrace, cctrace, args.solve, verbose)
 
 # load a program
 cpu.load(progfile, loadaddr)
 
 # process list
 procs = proclist()
-pid   = 0
+pid = 0
 stack = memsize * 1000
 for t in range(numthreads):
     if len(argv) > 1:
@@ -991,18 +1120,14 @@ procs.restore()
 if printstats:
     t1 = time_clock()
 ic = cpu.run(procs, intfreq, intrand)
-if printstats:
-    t2 = time_clock()
 
 if printstats:
-    print('')
-    print('STATS:: Instructions    %d' % ic)
-    print('STATS:: Emulation Rate  %.2f kinst/sec' % (float(ic) / float(t2 - t1) / 1000.0))
+    t2 = time_clock()
+    elapsed = t2 - t1
+    rate = (ic / elapsed / 1000.0) if elapsed > 0 else 0.0
+    print(f"\nSTATS:: Instructions    {ic}")
+    print(f"STATS:: Emulation Rate  {rate:.2f} kinst/sec")
 
 # use this for profiling
 # import cProfile
 # cProfile.run('run()')
-
-
-
-
