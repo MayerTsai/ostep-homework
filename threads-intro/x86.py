@@ -125,9 +125,26 @@ class cpu:
         """Pre-resolve trace targets to avoid lookups during simulation loop."""
         self.resolved_memtrace = []
         for m in self.memtrace:
-            addr = int(m) if m[0].isdigit() else self.vars.get(m)
+            addr = int(m) if m[0].isdigit() else self.labels.get(m)
             if addr is not None:
                 self.resolved_memtrace.append((m, addr))
+
+        self.trace_unknown = None
+        if not self.compute:
+            m_part = "".join(f"{'?':>5}" for _ in self.resolved_memtrace)
+            r_part = "".join(f"{'?':>5}" for _ in self.resolved_regtrace)
+            c_part = "".join("? " for _ in self.condlist)
+
+            final_parts = []
+            if m_part:
+                final_parts.append(m_part + " ")
+            if r_part:
+                final_parts.append(r_part + " ")
+            if self.cctrace:
+                final_parts.append(c_part)
+            self.trace_unknown = "".join(final_parts)
+            if self.trace_unknown == "":
+                self.trace_unknown = None
 
     def get_regnum(self, name):
         assert name in self.regnames
@@ -318,11 +335,14 @@ class cpu:
         return 0
 
     def push_m(self, value, reg1, reg2):
-        # print 'push_m', value, reg1, reg2
         self.registers[self.REG_SP] -= 4
         tmp = value + self.registers[reg1] + self.registers[reg2]
-        # push address onto stack, not memory value itself
-        self.memory[self.registers[self.REG_SP]] = tmp
+        self.memory[self.registers[self.REG_SP]] = self.memory[tmp]
+        return 0
+
+    def push_i(self, val):
+        self.registers[self.REG_SP] -= 4
+        self.memory[self.registers[self.REG_SP]] = val
         return 0
 
     def pop(self):
@@ -330,7 +350,7 @@ class cpu:
         return 0
 
     def pop_r(self, dst):
-        self.registers[dst] = self.registers[self.REG_SP]
+        self.registers[dst] = self.memory[self.registers[self.REG_SP]]
         self.registers[self.REG_SP] += 4
         return 0
 
@@ -378,10 +398,10 @@ class cpu:
             targ = tmp
             return targ, "TYPE_LABEL"
         elif tmp[0].isalpha() and not tmp[0].isdigit():
-            zassert(tmp in self.vars, "Variable %s is not declared" % tmp)
+            zassert(tmp in self.labels, "Variable %s is not declared" % tmp)
             return (
                 (
-                    self.vars[tmp],
+                    self.labels[tmp],
                     self.register_translate("zero"),
                     self.register_translate("zero"),
                 ),
@@ -437,312 +457,268 @@ class cpu:
         return
 
     def load(self, infile, loadaddr):
-        """Load a program into memory and pre-parse instructions into tuples."""
+
         pc = int(loadaddr)
         fd = open(infile)
-
-        bpc = loadaddr
-        data = 100
-
         for line in fd:
-            cline = line.rstrip()
-
-            if cline.startswith(("#", "//")) or not cline:
+            cline = line.split("#")[0].strip()
+            if not cline or cline.startswith("//"):
                 continue
 
-            # only pay attention to labels and variables
-            tmp = cline.split("#")
-            """
-            if tmp[0] == ".var":
-                assert len(tmp) == 2, f"no name or error name format for variable "
-                assert tmp[1] in self.vars, f"Variable {tmp[1]} already declared"
-                self.vars[tmp[1]] = data
-                data += 4
-                zassert(data < bpc, "Load address overrun by static data")
+            if cline.startswith("."):
+                self.labels[cline] = int(pc)
                 if self.verbose:
-                    print("ASSIGN VAR", tmp[0], "-->", tmp[1], self.vars[tmp[1]])
-            elif tmp[0][0] == ".":
-                assert len(tmp) == 1
-                self.labels[tmp[0]] = int(pc)
-                if self.verbose:
-                    print("ASSIGN LABEL", tmp[0], "-->", pc)
+                    print(f"ASSIGN LABEL {cline} --> {pc}")
             else:
                 pc += 1
-            """
-            if tmp[0].startswith("."):
-                self.labels[tmp[0]] = int(pc)
-                if self.verbose:
-                    print("ASSIGN LABEL", tmp[0], "-->", pc)
-            else:
-                pc += 1
+        # END: loop over file
         fd.close()
-
         if self.verbose:
             print("")
 
-        # second pass: do everything else
         pc = int(loadaddr)
         fd = open(infile)
         for line in fd:
-            cline = line.rstrip()
-            if cline.startswith(("#", "//")) or not cline:
+            cline = line.split("#")[0].strip()
+            if not cline or cline.startswith(("//", ".")):
                 continue
 
-            # skip labels: all else must be instructions
-            # stripped = cline.strip()
-            if not cline.startswith("."):
-                tmp = cline.split(None, 1)
-                opcode = tmp[0]
-                self.pmemory[pc] = cline.strip()
+            tmp = cline.split(None, 1)
+            opcode = tmp[0]
+            self.pmemory[pc] = cline.strip()
 
-                # MAIN OPCODE LOOP
-                if opcode == "mov":
-                    rtmp = tmp[1].split(",", 1)
-                    assert (
-                        len(rtmp) == 2
-                    ), f"mov: needs two args, separated by commas {cline}"
+            # MAIN OPCODE LOOP
+            if opcode == "mov":
+                rtmp = tmp[1].split(",", 1)
+                assert (
+                    len(rtmp) == 2
+                ), f"mov: needs two args, separated by commas {cline}"
 
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    src, stype = self.getarg(arg1)
-                    dst, dtype = self.getarg(arg2)
-                    if stype == "TYPE_MEMORY" and dtype == "TYPE_MEMORY":
-                        print("bad mov: two memory arguments")
-                        exit(1)
-                    elif stype == "TYPE_IMMEDIATE" and dtype == "TYPE_IMMEDIATE":
-                        print("bad mov: two immediate arguments")
-                        exit(1)
-                    elif stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
-                        self.memory[pc] = (self.move_i_to_r, (int(src), dst))
-                    elif stype == "TYPE_MEMORY" and dtype == "TYPE_REGISTER":
-                        # src is already a tuple (value, reg1, reg2)
-                        self.memory[pc] = (
-                            self.move_m_to_r,
-                            (
-                                src[0],
-                                src[1],
-                                src[2],
-                                dst,
-                            ),
-                        )
-                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_MEMORY":
-                        # dst is already a tuple (value, reg1, reg2)
-                        self.memory[pc] = (
-                            self.move_r_to_m,
-                            (
-                                src,
-                                dst[0],
-                                dst[1],
-                                dst[2],
-                            ),
-                        )
-                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
-                        self.memory[pc] = (self.move_r_to_r, (src, dst))
-                    elif stype == "TYPE_IMMEDIATE" and dtype == "TYPE_MEMORY":
-                        # dst is already a tuple (value, reg1, reg2)
-                        self.memory[pc] = (
-                            self.move_i_to_m,
-                            (
-                                src,
-                                dst[0],
-                                dst[1],
-                                dst[2],
-                            ),
-                        )
-                    else:
-                        zassert(False, "malformed mov instruction")
-                elif opcode == "pop":
-                    if len(tmp) == 1:
-                        self.memory[pc] = (self.pop, ())
-                    elif len(tmp) == 2:
-                        dst, dtype = self.getarg(tmp[1].strip())
-                        zassert(
-                            dtype == "TYPE_REGISTER", "Can only pop into a register"
-                        )
-                        self.memory[pc] = (self.pop_r, (dst,))
-                    else:
-                        zassert(False, "pop instruction must take zero/one args")
-                elif opcode == "push":
-                    src, stype = self.getarg(tmp[1].strip())
-                    if stype == "TYPE_REGISTER":
-                        self.memory[pc] = (self.push_r, (int(src),))
-                    elif stype == "TYPE_MEMORY":
-                        self.memory[pc] = (
-                            self.push_m,
-                            (src[0], src[1], src[2]),
-                        )
-                    else:
-                        zassert(False, "Cannot push anything but registers")
-                elif opcode == "call":
-                    targ, ttype = self.getarg(tmp[1].strip())
-                    if ttype == "TYPE_LABEL":
-                        self.memory[pc] = (self.call, (int(self.labels[targ]),))
-                    else:
-                        zassert(False, "Cannot call anything but a label")
-                elif opcode == "ret":
-                    assert len(tmp) == 1
-                    self.memory[pc] = (self.ret, ())
-                elif opcode == "add":
-                    rtmp = tmp[1].split(",", 1)
-                    zassert(
-                        len(tmp) == 2 and len(rtmp) == 2,
-                        "add: needs two args, separated by commas [%s]" % cline,
-                    )
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    src, stype = self.getarg(arg1)
-                    dst, dtype = self.getarg(arg2)
-                    if stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
-                        self.memory[pc] = (self.add_i_r, (int(src), dst))
-                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
-                        self.memory[pc] = (self.add_r_r, (int(src), dst))
-                    else:
-                        zassert(False, "malformed usage of add instruction")
-                elif opcode == "sub":
-                    rtmp = tmp[1].split(",", 1)
-                    zassert(
-                        len(tmp) == 2 and len(rtmp) == 2,
-                        "sub: needs two args, separated by commas [%s]" % cline,
-                    )
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    src, stype = self.getarg(arg1)
-                    dst, dtype = self.getarg(arg2)
-                    if stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
-                        self.memory[pc] = (self.sub_i_r, (int(src), dst))
-                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
-                        self.memory[pc] = (self.sub_r_r, (int(src), dst))
-                    else:
-                        zassert(False, "malformed usage of sub instruction")
-                elif opcode == "fetchadd":
-                    rtmp = tmp[1].split(",", 1)
-                    zassert(
-                        len(tmp) == 2 and len(rtmp) == 2,
-                        "fetchadd: needs two args, separated by commas [%s]" % cline,
-                    )
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    src, stype = self.getarg(arg1)
-                    dst, dtype = self.getarg(arg2)
-                    if stype == "TYPE_REGISTER" and dtype == "TYPE_MEMORY":
-                        self.memory[pc] = (
-                            self.fetchadd,
-                            (
-                                src,
-                                dst[0],
-                                dst[1],
-                                dst[2],
-                            ),
-                        )
-                    else:
-                        zassert(False, "poorly specified fetch and add")
-                elif opcode == "xchg":
-                    rtmp = tmp[1].split(",", 1)
-                    zassert(
-                        len(tmp) == 2 and len(rtmp) == 2,
-                        "xchg: needs two args, separated by commas [%s]" % cline,
-                    )
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    src, stype = self.getarg(arg1)
-                    dst, dtype = self.getarg(arg2)
-                    if stype == "TYPE_REGISTER" and dtype == "TYPE_MEMORY":
-                        self.memory[pc] = (
-                            self.atomic_exchange,
-                            (
-                                src,
-                                dst[0],
-                                dst[1],
-                                dst[2],
-                            ),
-                        )
-                    else:
-                        zassert(False, "poorly specified atomic exchange")
-                elif opcode == "test":
-                    rtmp = tmp[1].split(",", 1)
-                    zassert(
-                        len(tmp) == 2 and len(rtmp) == 2,
-                        "test: needs two args, separated by commas [%s]" % cline,
-                    )
-                    arg1 = rtmp[0].strip()
-                    arg2 = rtmp[1].strip()
-                    src, stype = self.getarg(arg1)
-                    dst, dtype = self.getarg(arg2)
-                    if stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
-                        self.memory[pc] = (self.test_i_r, (int(src), dst))
-                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
-                        self.memory[pc] = (self.test_r_r, (int(src), dst))
-                    elif stype == "TYPE_REGISTER" and dtype == "TYPE_IMMEDIATE":
-                        self.memory[pc] = (self.test_r_i, (int(src), dst))
-                    else:
-                        zassert(False, "malformed usage of test instruction")
-                elif opcode == "j":
-                    targ, ttype = self.getarg(tmp[1].strip())
-                    zassert(
-                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
-                    )
-                    self.memory[pc] = (self.jump, (int(self.labels[targ]),))
-                elif opcode == "jne":
-                    targ, ttype = self.getarg(tmp[1].strip())
-                    zassert(
-                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
-                    )
-                    self.memory[pc] = (self.jump_notequal, (int(self.labels[targ]),))
-                elif opcode == "je":
-                    targ, ttype = self.getarg(tmp[1].strip())
-                    zassert(
-                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
-                    )
-                    self.memory[pc] = (self.jump_equal, (int(self.labels[targ]),))
-                elif opcode == "jlt":
-                    targ, ttype = self.getarg(tmp[1].strip())
-                    zassert(
-                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
-                    )
-                    self.memory[pc] = (self.jump_lessthan, (int(self.labels[targ]),))
-                elif opcode == "jlte":
-                    targ, ttype = self.getarg(tmp[1].strip())
-                    zassert(
-                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
-                    )
-                    self.memory[pc] = (
-                        self.jump_lessthanorequal,
-                        (int(self.labels[targ]),),
-                    )
-                elif opcode == "jgt":
-                    targ, ttype = self.getarg(tmp[1].strip())
-                    zassert(
-                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
-                    )
-                    self.memory[pc] = (self.jump_greaterthan, (int(self.labels[targ]),))
-                elif opcode == "jgte":
-                    targ, ttype = self.getarg(tmp[1].strip())
-                    zassert(
-                        ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip()
-                    )
-                    self.memory[pc] = (
-                        self.jump_greaterthanorequal,
-                        (int(self.labels[targ]),),
-                    )
-                elif opcode == "nop":
-                    self.memory[pc] = (self.nop, ())
-                elif opcode == "halt":
-                    self.memory[pc] = (self.halt, ())
-                elif opcode == "yield":
-                    self.memory[pc] = (self.iyield, ())
-                elif opcode == "rdump":
-                    self.memory[pc] = (self.rdump, ())
-                elif opcode == "mdump":
-                    self.memory[pc] = (self.mdump, (int(tmp[1]),))
-                else:
-                    print("illegal opcode: ", opcode)
+                arg1 = rtmp[0].strip()
+                arg2 = rtmp[1].strip()
+                src, stype = self.getarg(arg1)
+                dst, dtype = self.getarg(arg2)
+                if stype == "TYPE_MEMORY" and dtype == "TYPE_MEMORY":
+                    print("bad mov: two memory arguments")
                     exit(1)
-                if self.verbose:
-                    print(
-                        f"pc:{pc} LOADING {self.pmemory[pc]:>20s} --> {self.memory[pc]}"
+                elif stype == "TYPE_IMMEDIATE" and dtype == "TYPE_IMMEDIATE":
+                    print("bad mov: two immediate arguments")
+                    exit(1)
+                elif stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
+                    self.memory[pc] = (self.move_i_to_r, (int(src), dst))
+                elif stype == "TYPE_MEMORY" and dtype == "TYPE_REGISTER":
+                    # src is already a tuple (value, reg1, reg2)
+                    self.memory[pc] = (
+                        self.move_m_to_r,
+                        (
+                            src[0],
+                            src[1],
+                            src[2],
+                            dst,
+                        ),
                     )
-                # INCREMENT PC for loader
-                pc += 1
+                elif stype == "TYPE_REGISTER" and dtype == "TYPE_MEMORY":
+                    # dst is already a tuple (value, reg1, reg2)
+                    self.memory[pc] = (
+                        self.move_r_to_m,
+                        (
+                            src,
+                            dst[0],
+                            dst[1],
+                            dst[2],
+                        ),
+                    )
+                elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
+                    self.memory[pc] = (self.move_r_to_r, (src, dst))
+                elif stype == "TYPE_IMMEDIATE" and dtype == "TYPE_MEMORY":
+                    # dst is already a tuple (value, reg1, reg2)
+                    self.memory[pc] = (
+                        self.move_i_to_m,
+                        (
+                            src,
+                            dst[0],
+                            dst[1],
+                            dst[2],
+                        ),
+                    )
+                else:
+                    zassert(False, "malformed mov instruction")
+            elif opcode == "pop":
+                if len(tmp) == 1:
+                    self.memory[pc] = (self.pop, ())
+                elif len(tmp) == 2:
+                    dst, dtype = self.getarg(tmp[1].strip())
+                    zassert(dtype == "TYPE_REGISTER", "Can only pop into a register")
+                    self.memory[pc] = (self.pop_r, (dst,))
+                else:
+                    zassert(False, "pop instruction must take zero/one args")
+            elif opcode == "push":
+                src, stype = self.getarg(tmp[1].strip())
+                if stype == "TYPE_REGISTER":
+                    self.memory[pc] = (self.push_r, (int(src),))
+                elif stype == "TYPE_IMMEDIATE":
+                    self.memory[pc] = (self.push_i, (int(src),))
+                elif stype == "TYPE_MEMORY":
+                    self.memory[pc] = (
+                        self.push_m,
+                        (src[0], src[1], src[2]),
+                    )
+                else:
+                    zassert(False, "Cannot push this type")
+            elif opcode == "call":
+                targ, ttype = self.getarg(tmp[1].strip())
+                if ttype == "TYPE_LABEL":
+                    self.memory[pc] = (self.call, (int(self.labels[targ]),))
+                else:
+                    zassert(False, "Cannot call anything but a label")
+            elif opcode == "ret":
+                assert len(tmp) == 1
+                self.memory[pc] = (self.ret, ())
+            elif opcode == "add":
+                rtmp = tmp[1].split(",", 1)
+                zassert(
+                    len(tmp) == 2 and len(rtmp) == 2,
+                    "add: needs two args, separated by commas [%s]" % cline,
+                )
+                arg1 = rtmp[0].strip()
+                arg2 = rtmp[1].strip()
+                src, stype = self.getarg(arg1)
+                dst, dtype = self.getarg(arg2)
+                if stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
+                    self.memory[pc] = (self.add_i_r, (int(src), dst))
+                elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
+                    self.memory[pc] = (self.add_r_r, (int(src), dst))
+                else:
+                    zassert(False, "malformed usage of add instruction")
+            elif opcode == "sub":
+                rtmp = tmp[1].split(",", 1)
+                zassert(
+                    len(tmp) == 2 and len(rtmp) == 2,
+                    "sub: needs two args, separated by commas [%s]" % cline,
+                )
+                arg1 = rtmp[0].strip()
+                arg2 = rtmp[1].strip()
+                src, stype = self.getarg(arg1)
+                dst, dtype = self.getarg(arg2)
+                if stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
+                    self.memory[pc] = (self.sub_i_r, (int(src), dst))
+                elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
+                    self.memory[pc] = (self.sub_r_r, (int(src), dst))
+                else:
+                    zassert(False, "malformed usage of sub instruction")
+            elif opcode == "fetchadd":
+                rtmp = tmp[1].split(",", 1)
+                zassert(
+                    len(tmp) == 2 and len(rtmp) == 2,
+                    "fetchadd: needs two args, separated by commas [%s]" % cline,
+                )
+                arg1 = rtmp[0].strip()
+                arg2 = rtmp[1].strip()
+                src, stype = self.getarg(arg1)
+                dst, dtype = self.getarg(arg2)
+                if stype == "TYPE_REGISTER" and dtype == "TYPE_MEMORY":
+                    self.memory[pc] = (
+                        self.fetchadd,
+                        (
+                            src,
+                            dst[0],
+                            dst[1],
+                            dst[2],
+                        ),
+                    )
+                else:
+                    zassert(False, "poorly specified fetch and add")
+            elif opcode == "xchg":
+                rtmp = tmp[1].split(",", 1)
+                zassert(
+                    len(tmp) == 2 and len(rtmp) == 2,
+                    "xchg: needs two args, separated by commas [%s]" % cline,
+                )
+                arg1 = rtmp[0].strip()
+                arg2 = rtmp[1].strip()
+                src, stype = self.getarg(arg1)
+                dst, dtype = self.getarg(arg2)
+                if stype == "TYPE_REGISTER" and dtype == "TYPE_MEMORY":
+                    self.memory[pc] = (
+                        self.atomic_exchange,
+                        (
+                            src,
+                            dst[0],
+                            dst[1],
+                            dst[2],
+                        ),
+                    )
+                else:
+                    zassert(False, "poorly specified atomic exchange")
+            elif opcode == "test":
+                rtmp = tmp[1].split(",", 1)
+                zassert(
+                    len(tmp) == 2 and len(rtmp) == 2,
+                    "test: needs two args, separated by commas [%s]" % cline,
+                )
+                arg1 = rtmp[0].strip()
+                arg2 = rtmp[1].strip()
+                src, stype = self.getarg(arg1)
+                dst, dtype = self.getarg(arg2)
+                if stype == "TYPE_IMMEDIATE" and dtype == "TYPE_REGISTER":
+                    self.memory[pc] = (self.test_i_r, (int(src), dst))
+                elif stype == "TYPE_REGISTER" and dtype == "TYPE_REGISTER":
+                    self.memory[pc] = (self.test_r_r, (int(src), dst))
+                elif stype == "TYPE_REGISTER" and dtype == "TYPE_IMMEDIATE":
+                    self.memory[pc] = (self.test_r_i, (int(src), dst))
+                else:
+                    zassert(False, "malformed usage of test instruction")
+            elif opcode == "j":
+                targ, ttype = self.getarg(tmp[1].strip())
+                zassert(ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip())
+                self.memory[pc] = (self.jump, (int(self.labels[targ]),))
+            elif opcode == "jne":
+                targ, ttype = self.getarg(tmp[1].strip())
+                zassert(ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip())
+                self.memory[pc] = (self.jump_notequal, (int(self.labels[targ]),))
+            elif opcode == "je":
+                targ, ttype = self.getarg(tmp[1].strip())
+                assert ttype == "TYPE_LABEL", f"bad jump target {tmp[1].strip()}"
+                self.memory[pc] = (self.jump_equal, (int(self.labels[targ]),))
+            elif opcode == "jlt":
+                targ, ttype = self.getarg(tmp[1].strip())
+                zassert(ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip())
+                self.memory[pc] = (self.jump_lessthan, (int(self.labels[targ]),))
+            elif opcode == "jlte":
+                targ, ttype = self.getarg(tmp[1].strip())
+                zassert(ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip())
+                self.memory[pc] = (
+                    self.jump_lessthanorequal,
+                    (int(self.labels[targ]),),
+                )
+            elif opcode == "jgt":
+                targ, ttype = self.getarg(tmp[1].strip())
+                zassert(ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip())
+                self.memory[pc] = (self.jump_greaterthan, (int(self.labels[targ]),))
+            elif opcode == "jgte":
+                targ, ttype = self.getarg(tmp[1].strip())
+                zassert(ttype == "TYPE_LABEL", "bad jump target [%s]" % tmp[1].strip())
+                self.memory[pc] = (
+                    self.jump_greaterthanorequal,
+                    (int(self.labels[targ]),),
+                )
+            elif opcode == "nop":
+                self.memory[pc] = (self.nop, ())
+            elif opcode == "halt":
+                self.memory[pc] = (self.halt, ())
+            elif opcode == "yield":
+                self.memory[pc] = (self.iyield, ())
+            elif opcode == "rdump":
+                self.memory[pc] = (self.rdump, ())
+            elif opcode == "mdump":
+                self.memory[pc] = (self.mdump, (int(tmp[1]),))
+            else:
+                print("illegal opcode: ", opcode)
+                exit(1)
+
+            if self.verbose:
+                print(f"pc:{pc} LOADING {self.pmemory[pc]:>20s} --> {self.memory[pc]}")
+            pc += 1
         # END: loop over file
         fd.close()
         if self.verbose:
@@ -772,30 +748,26 @@ class cpu:
         """Constructs the trace string for the current CPU state."""
         if not (self.resolved_memtrace or self.resolved_regtrace or self.cctrace):
             return ""
+        if self.trace_unknown is not None:
+            return self.trace_unknown
 
         parts = []
         if self.resolved_memtrace:
-            for _, addr in self.resolved_memtrace:
-                if self.compute:
-                    parts.append(f"{self.memory[addr]:>5}")
-                else:
-                    parts.append(f"{'?':>5}")
+            parts.append(
+                "".join(f"{self.memory[addr]:>5}" for _, addr in self.resolved_memtrace)
+            )
             parts.append(" ")
 
         if self.resolved_regtrace:
-            for ridx in self.resolved_regtrace:
-                if self.compute:
-                    parts.append(f"{self.registers[ridx]:>5}")
-                else:
-                    parts.append(f"{'?':>5}")
+            parts.append(
+                "".join(f"{self.registers[ridx]:>5}" for ridx in self.resolved_regtrace)
+            )
             parts.append(" ")
 
         if self.cctrace:
-            for c in self.condlist:
-                if self.compute:
-                    parts.append("1 " if self.conditions[c] else "0 ")
-                else:
-                    parts.append("? ")
+            parts.append(
+                "".join("1 " if self.conditions[c] else "0 " for c in self.condlist)
+            )
         return "".join(parts)
 
     def setint(self, intfreq, intrand):
@@ -810,9 +782,12 @@ class cpu:
         interrupt = self.setint(intfreq, intrand)
         icount = 0
 
+        num_threads = procs.getnum()
+        col_width = self._COLUMN_WIDTH
+        padding_strings = [" " * (i * col_width) for i in range(num_threads)]
+
         # Optimization: Localize lookups for speed in Python hot loops
         get_trace = self.get_trace
-        procs_getcurr = procs.getcurr
         procs_next = procs.next
         procs_save = procs.save
         procs_restore = procs.restore
@@ -820,14 +795,13 @@ class cpu:
         # Localize frequently used attributes for faster access
         memory = self.memory
         pmemory = self.pmemory
-        col_width = self._COLUMN_WIDTH
 
         self.print_headers(procs)
         print(get_trace())
 
         while True:
-            curr_proc = procs_getcurr()
-            tid = curr_proc.gettid()
+            curr_proc = procs.plist[procs.curr]
+            tid = curr_proc.tid
 
             # FETCH
             prevPC = self.PC
@@ -838,7 +812,7 @@ class cpu:
             rc = func(*args)
 
             # Trace and instruction output
-            print(f"{get_trace()}{' ' * (tid * col_width)}{prevPC} {pmemory[prevPC]}")
+            print(f"{get_trace()}{padding_strings[tid]}{prevPC} {pmemory[prevPC]}")
             icount += 1
 
             if rc == -1:
@@ -848,7 +822,7 @@ class cpu:
                 procs_next()
                 procs_restore()
 
-                msg = "".join(["----- Halt;Switch ----- "] * procs.getnum())
+                msg = "".join(["----- Halt;Switch ----- "] * num_threads)
                 print(f"{get_trace()}{msg}")
                 interrupt = self.setint(intfreq, intrand)
                 continue
@@ -860,7 +834,7 @@ class cpu:
                 procs_next()
                 procs_restore()
 
-                msg = "".join(["------ Interrupt ------ "] * procs.getnum())
+                msg = "".join(["------ Interrupt ------ "] * num_threads)
                 print(f"{get_trace()}{msg}")
 
 
@@ -915,47 +889,33 @@ class process:
         self.cpu = cpu  # object reference
         self.tid = tid
         self.pc = pc
-        self.regs = {}
-        self.cc = {}
+        self.regs = [0] * 7
+        self.cc = [False] * 6
         self.done = False
         self.stack = stackbottom
 
-        # init regs: all 0 or specially set to something
-        for r in self.cpu.regnums:
-            self.regs[r] = 0
         if reginit != "":
-            # form: ax=1,bx=2 (for some subset of registers)
+            # form: ax=1:bx=2
             for r in reginit.split(":"):
                 tmp = r.split("=")
-                assert len(tmp) == 2
-                self.regs[self.cpu.get_regnum(tmp[0])] = int(tmp[1])
-
-        # init CCs
-        for c in self.cpu.condlist:
-            self.cc[c] = False
+                if len(tmp) == 2:
+                    self.regs[self.cpu.get_regnum(tmp[0])] = int(tmp[1])
 
         # stack
         self.regs[self.cpu.get_regnum("sp")] = stackbottom
-        # print 'REG', self.cpu.get_regnum('sp'), self.regs[self.cpu.get_regnum('sp')]
-
-        return
 
     def gettid(self):
         return self.tid
 
     def save(self):
-        self.pc = self.cpu.get_pc()
-        for c in self.cpu.condlist:
-            self.cc[c] = self.cpu.get_cond(c)
-        for r in self.cpu.regnums:
-            self.regs[r] = self.cpu.get_reg(r)
+        self.pc = self.cpu.PC
+        self.cc[:] = self.cpu.conditions
+        self.regs[:] = self.cpu.registers
 
     def restore(self):
-        self.cpu.set_pc(self.pc)
-        for c in self.cpu.condlist:
-            self.cpu.set_cond(c, self.cc[c])
-        for r in self.cpu.regnums:
-            self.cpu.set_reg(r, self.regs[r])
+        self.cpu.PC = self.pc
+        self.cpu.conditions[:] = self.cc
+        self.cpu.registers[:] = self.regs
 
     def setdone(self):
         self.done = True
@@ -1118,13 +1078,15 @@ procs.restore()
 # run it
 if printstats:
     t1 = time_clock()
+
 ic = cpu.run(procs, intfreq, intrand)
 
 if printstats:
     t2 = time_clock()
     elapsed = t2 - t1
     rate = (ic / elapsed / 1000.0) if elapsed > 0 else 0.0
-    print(f"\nSTATS:: Instructions    {ic}")
+    print()
+    print(f"STATS:: Instructions    {ic}")
     print(f"STATS:: Emulation Rate  {rate:.2f} kinst/sec")
 
 # use this for profiling
